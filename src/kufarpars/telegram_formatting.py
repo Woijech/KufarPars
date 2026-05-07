@@ -8,8 +8,11 @@ Telegram-specific limits in one place.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from html import escape
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from kufarpars.config import settings
 from kufarpars.models import Listing
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -73,7 +76,7 @@ def listing_facts(listing: Listing) -> str:
     if listing.short_location:
         rows.append(f"📍 <b>Адрес:</b> {escape(listing.short_location)}")
     if listing.published_at:
-        published = listing.published_at.strftime("%d.%m.%Y %H:%M")
+        published = format_published_at(listing.published_at)
         rows.append(f"🕒 <b>Опубликовано:</b> {escape(published)}")
     return "\n".join(rows)
 
@@ -108,6 +111,17 @@ def description_message(description: str) -> str:
 def listing_url(listing: Listing) -> str:
     """Format the public listing URL for Telegram messages."""
     return f"🔗 <b>Объявление:</b> {escape(listing.url)}"
+
+
+def format_published_at(value: datetime) -> str:
+    """Format Kufar publication time in the bot display timezone."""
+    try:
+        timezone = ZoneInfo(settings.bot_display_timezone)
+    except ZoneInfoNotFoundError:
+        timezone = ZoneInfo("Europe/Minsk")
+    if value.tzinfo is None:
+        return value.strftime("%d.%m.%Y %H:%M")
+    return value.astimezone(timezone).strftime("%d.%m.%Y %H:%M")
 
 
 def trim_for_telegram(text: str, limit: int) -> str:

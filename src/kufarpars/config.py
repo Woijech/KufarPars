@@ -54,6 +54,10 @@ class Settings:
     bot_fetch_retry_delay_seconds: float = float(
         getenv("KUFARPARS_BOT_FETCH_RETRY_DELAY_SECONDS", "1")
     )
+    bot_display_timezone: str = getenv(
+        "KUFARPARS_BOT_DISPLAY_TIMEZONE",
+        "Europe/Minsk",
+    )
     bot_max_pages: int = int(getenv("KUFARPARS_BOT_MAX_PAGES", "1"))
     bot_page_delay_seconds: float = float(
         getenv("KUFARPARS_BOT_PAGE_DELAY_SECONDS", "1")

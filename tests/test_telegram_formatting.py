@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from kufarpars.models import Listing, ListingImage
 from kufarpars.telegram_formatting import build_listing_presentation
 
@@ -11,6 +13,7 @@ def test_build_listing_presentation_uses_images_and_full_description() -> None:
         images=[ListingImage(gallery_url="https://example.test/1.jpg")],
         price_usd=150,
         seller_name="Агент",
+        published_at=datetime(2026, 5, 7, 20, 23, tzinfo=UTC),
     )
 
     presentation = build_listing_presentation(listing, max_images=1)
@@ -21,3 +24,4 @@ def test_build_listing_presentation_uses_images_and_full_description() -> None:
     assert presentation.details is None
     assert "Контакт" not in presentation.caption
     assert "Агент" not in presentation.caption
+    assert "07.05.2026 23:23" in presentation.caption
