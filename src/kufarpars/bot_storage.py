@@ -1,108 +1,26 @@
-"""SQLite storage for Telegram bot profiles and seen listings.
+"""Storage repository for Telegram bot profiles and seen listings.
 
-The production default is SQLite because it is simple to deploy, persistent,
-and perfectly adequate for one bot process. The schema keeps profiles and seen
-advertisements separate: profile rows are tiny, while ``seen_ads`` can grow and
-be pruned independently.
+The public methods intentionally speak in bot-domain terms while SQLAlchemy
+owns the database details underneath. SQLite remains the local default, and the
+same models work with PostgreSQL through ``KUFARPARS_DATABASE_URL``.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import create_engine, delete, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+
 from kufarpars.client import SearchRequest
+from kufarpars.db import Base, ChatRow, NotificationLogRow, SeenAdRow, SubscriptionRow
 
-SCHEMA_SQL = """
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS profiles (
-    chat_id INTEGER PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    watch_started_at TEXT,
-    request_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS seen_ads (
-    chat_id INTEGER NOT NULL,
-    ad_id INTEGER NOT NULL,
-    seen_at TEXT NOT NULL,
-    PRIMARY KEY (chat_id, ad_id),
-    FOREIGN KEY (chat_id) REFERENCES profiles(chat_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_seen_ads_chat_seen_at
-    ON seen_ads(chat_id, seen_at DESC);
-"""
-
-SELECT_PROFILE_SQL = """
-SELECT chat_id, enabled, watch_started_at, request_json
-FROM profiles
-WHERE chat_id = ?
-"""
-
-UPSERT_PROFILE_SQL = """
-INSERT INTO profiles (
-    chat_id,
-    enabled,
-    watch_started_at,
-    request_json,
-    updated_at
-)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(chat_id) DO UPDATE SET
-    enabled = excluded.enabled,
-    watch_started_at = excluded.watch_started_at,
-    request_json = excluded.request_json,
-    updated_at = excluded.updated_at
-"""
-
-SELECT_ENABLED_PROFILES_SQL = """
-SELECT chat_id, enabled, watch_started_at, request_json
-FROM profiles
-WHERE enabled = 1
-"""
-
-SELECT_RECENT_SEEN_IDS_SQL = """
-SELECT ad_id
-FROM seen_ads
-WHERE chat_id = ?
-ORDER BY seen_at DESC
-LIMIT ?
-"""
-
-UPSERT_SEEN_AD_SQL = """
-INSERT INTO seen_ads (chat_id, ad_id, seen_at)
-VALUES (?, ?, ?)
-ON CONFLICT(chat_id, ad_id) DO UPDATE SET seen_at = excluded.seen_at
-"""
-
-DELETE_SEEN_BY_CHAT_SQL = "DELETE FROM seen_ads WHERE chat_id = ?"
-DELETE_OLD_SEEN_SQL = "DELETE FROM seen_ads WHERE seen_at < ?"
-DELETE_OLD_SEEN_BY_CHAT_SQL = """
-DELETE FROM seen_ads
-WHERE seen_at < ? AND chat_id = ?
-"""
-
-PRUNE_SEEN_LIMIT_SQL = """
-DELETE FROM seen_ads
-WHERE chat_id = ?
-  AND ad_id NOT IN (
-      SELECT ad_id
-      FROM seen_ads
-      WHERE chat_id = ?
-      ORDER BY seen_at DESC
-      LIMIT ?
-  )
-"""
-
-PROFILE_COLUMNS_SQL = "PRAGMA table_info(profiles)"
-ADD_WATCH_STARTED_AT_SQL = "ALTER TABLE profiles ADD COLUMN watch_started_at TEXT"
+DEFAULT_SUBSCRIPTION_TITLE = "Основной поиск"
 
 
 @dataclass
@@ -117,120 +35,286 @@ class UserProfile:
 
 
 class BotStorage:
-    """Persist bot profiles and seen listing ids in SQLite."""
+    """Persist bot profiles and seen listing ids through SQLAlchemy."""
 
     def __init__(
         self,
-        path: str,
+        database_url: str,
         legacy_json_path: str | None = None,
         seen_ttl_days: int = 60,
         max_seen_per_chat: int = 5000,
+        create_schema: bool = True,
     ) -> None:
         """Create storage, initialize schema, and migrate old JSON state if found."""
-        self._path = Path(path)
+        self._database_url = _normalize_database_url(database_url)
         self._legacy_json_path = Path(legacy_json_path) if legacy_json_path else None
         self._seen_ttl_days = seen_ttl_days
         self._max_seen_per_chat = max_seen_per_chat
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self._path)
-        self._connection.row_factory = sqlite3.Row
-        self._initialize()
+        self._engine = _create_engine(self._database_url)
+        if create_schema:
+            Base.metadata.create_all(self._engine)
+        self._session_factory = sessionmaker(
+            bind=self._engine,
+            expire_on_commit=False,
+            future=True,
+        )
         self._migrate_legacy_json()
 
     def close(self) -> None:
-        """Close the SQLite connection."""
-        self._connection.close()
+        """Dispose the underlying SQLAlchemy engine."""
+        self._engine.dispose()
+
+    @property
+    def engine(self) -> Engine:
+        """Return the SQLAlchemy engine for Alembic and diagnostics."""
+        return self._engine
 
     def get(self, chat_id: int) -> UserProfile:
         """Return an existing profile or create a new default one."""
-        row = self._fetch_profile_row(chat_id)
-        if row is None:
-            profile = UserProfile(chat_id=chat_id)
-            self.update(profile)
-            return profile
-        return self._profile_from_row(row)
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            session.commit()
+            return self._profile_from_subscription(session, subscription)
 
     def update(self, profile: UserProfile) -> None:
         """Upsert profile settings and optionally persist provided seen ids."""
-        self._upsert_profile(profile)
-        if profile.seen_ids:
-            self.mark_seen(profile.chat_id, profile.seen_ids)
-        self._connection.commit()
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, profile.chat_id)
+            subscription.enabled = profile.enabled
+            subscription.watch_started_at = _datetime_to_db(profile.watch_started_at)
+            subscription.request_json = _request_to_json(profile.request)
+            subscription.updated_at = datetime.now(UTC)
+            session.flush()
+            if profile.seen_ids:
+                self._mark_seen_for_subscription(
+                    session,
+                    subscription.id,
+                    profile.seen_ids,
+                )
+            session.commit()
 
     def all_enabled(self) -> list[UserProfile]:
         """Return all profiles with background monitoring enabled."""
-        rows = self._connection.execute(SELECT_ENABLED_PROFILES_SQL).fetchall()
-        return [self._profile_from_row(row) for row in rows]
+        with self._session_factory() as session:
+            subscriptions = session.scalars(
+                select(SubscriptionRow).where(SubscriptionRow.enabled.is_(True))
+            ).all()
+            return [
+                self._profile_from_subscription(session, subscription)
+                for subscription in subscriptions
+            ]
 
     def recent_seen_ids(self, chat_id: int, limit: int | None = None) -> list[int]:
         """Return recent seen listing ids for one chat."""
-        rows = self._connection.execute(
-            SELECT_RECENT_SEEN_IDS_SQL,
-            (chat_id, limit or self._max_seen_per_chat),
-        ).fetchall()
-        return [int(row["ad_id"]) for row in rows]
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            rows = session.scalars(
+                select(SeenAdRow.ad_id)
+                .where(SeenAdRow.subscription_id == subscription.id)
+                .order_by(SeenAdRow.seen_at.desc())
+                .limit(limit or self._max_seen_per_chat)
+            ).all()
+            return [int(ad_id) for ad_id in rows]
 
     def mark_seen(self, chat_id: int, ad_ids: list[int]) -> None:
         """Insert seen listing ids using a unique key to prevent duplicates."""
         if not ad_ids:
             return
-        seen_at = _now_iso()
-        unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
-        self._connection.executemany(
-            UPSERT_SEEN_AD_SQL,
-            [(chat_id, ad_id, seen_at) for ad_id in unique_ids],
-        )
-        self.prune_seen(chat_id)
-        self._connection.commit()
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            session.flush()
+            self._mark_seen_for_subscription(session, subscription.id, ad_ids)
+            self._prune_seen_for_subscription(session, subscription.id)
+            session.commit()
 
     def unseen_ids(self, chat_id: int, ad_ids: list[int]) -> list[int]:
         """Return ids from ``ad_ids`` that have not been seen for this chat."""
         if not ad_ids:
             return []
         unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
-        rows = self._connection.execute(
-            _select_seen_ad_ids_sql(len(unique_ids)),
-            [chat_id, *unique_ids],
-        ).fetchall()
-        seen = {int(row["ad_id"]) for row in rows}
-        return [ad_id for ad_id in ad_ids if ad_id not in seen]
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            seen_ids = set(
+                session.scalars(
+                    select(SeenAdRow.ad_id).where(
+                        SeenAdRow.subscription_id == subscription.id,
+                        SeenAdRow.ad_id.in_(unique_ids),
+                    )
+                ).all()
+            )
+            return [ad_id for ad_id in ad_ids if ad_id not in seen_ids]
 
     def reset_seen(self, chat_id: int) -> None:
         """Delete seen listing ids for one chat, usually after filter changes."""
-        self._connection.execute(DELETE_SEEN_BY_CHAT_SQL, (chat_id,))
-        self._connection.commit()
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            session.execute(
+                delete(SeenAdRow).where(SeenAdRow.subscription_id == subscription.id)
+            )
+            session.commit()
 
     def prune_seen(self, chat_id: int | None = None) -> None:
-        """Remove old and excessive seen-id rows to keep SQLite small."""
+        """Remove old and excessive seen-id rows to keep storage small."""
         cutoff = datetime.now(UTC) - timedelta(days=self._seen_ttl_days)
-        if chat_id is not None:
-            self._connection.execute(
-                DELETE_OLD_SEEN_BY_CHAT_SQL,
-                (cutoff.isoformat(), chat_id),
+        with self._session_factory() as session:
+            if chat_id is not None:
+                subscription = self._default_subscription(session, chat_id)
+                self._prune_seen_for_subscription(session, subscription.id, cutoff)
+            else:
+                session.execute(delete(SeenAdRow).where(SeenAdRow.seen_at < cutoff))
+            session.commit()
+
+    def log_notification(
+        self,
+        chat_id: int,
+        ad_id: int,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Persist one notification attempt for later diagnostics."""
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            session.add(
+                NotificationLogRow(
+                    subscription_id=subscription.id,
+                    ad_id=ad_id,
+                    status=status,
+                    error=error,
+                )
             )
-            self._prune_seen_limit(chat_id)
-            return
-        self._connection.execute(DELETE_OLD_SEEN_SQL, (cutoff.isoformat(),))
+            session.commit()
 
-    def _initialize(self) -> None:
-        """Create tables and indexes if they do not exist."""
-        self._connection.executescript(SCHEMA_SQL)
-        self._ensure_profile_columns()
-        self._connection.commit()
+    def _default_subscription(
+        self,
+        session: Session,
+        chat_id: int,
+    ) -> SubscriptionRow:
+        """Return the default subscription row for compatibility with current bot UI."""
+        chat = session.get(ChatRow, chat_id)
+        if chat is None:
+            chat = ChatRow(id=chat_id)
+            session.add(chat)
+            session.flush()
 
-    def _ensure_profile_columns(self) -> None:
-        """Add profile columns introduced after the initial SQLite schema."""
-        columns = {
-            row["name"] for row in self._connection.execute(PROFILE_COLUMNS_SQL)
-        }
-        if "watch_started_at" not in columns:
-            self._connection.execute(ADD_WATCH_STARTED_AT_SQL)
+        subscription = session.scalar(
+            select(SubscriptionRow).where(
+                SubscriptionRow.chat_id == chat_id,
+                SubscriptionRow.title == DEFAULT_SUBSCRIPTION_TITLE,
+            )
+        )
+        if subscription is not None:
+            return subscription
+
+        subscription = SubscriptionRow(
+            chat_id=chat_id,
+            title=DEFAULT_SUBSCRIPTION_TITLE,
+            enabled=False,
+            request_json=_request_to_json(SearchRequest()),
+        )
+        session.add(subscription)
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            subscription = session.scalar(
+                select(SubscriptionRow).where(
+                    SubscriptionRow.chat_id == chat_id,
+                    SubscriptionRow.title == DEFAULT_SUBSCRIPTION_TITLE,
+                )
+            )
+            if subscription is None:
+                raise
+        return subscription
+
+    def _profile_from_subscription(
+        self,
+        session: Session,
+        subscription: SubscriptionRow,
+    ) -> UserProfile:
+        """Convert one subscription row into the current bot profile object."""
+        seen_ids = session.scalars(
+            select(SeenAdRow.ad_id)
+            .where(SeenAdRow.subscription_id == subscription.id)
+            .order_by(SeenAdRow.seen_at.desc())
+            .limit(self._max_seen_per_chat)
+        ).all()
+        return UserProfile(
+            chat_id=subscription.chat_id,
+            enabled=subscription.enabled,
+            watch_started_at=_datetime_from_db(subscription.watch_started_at),
+            request=_request_from_json(subscription.request_json),
+            seen_ids=[int(ad_id) for ad_id in seen_ids],
+        )
+
+    def _mark_seen_for_subscription(
+        self,
+        session: Session,
+        subscription_id: int,
+        ad_ids: list[int],
+    ) -> None:
+        """Insert or refresh seen listing ids for one subscription."""
+        seen_at = datetime.now(UTC)
+        unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
+        existing = set(
+            session.scalars(
+                select(SeenAdRow.ad_id).where(
+                    SeenAdRow.subscription_id == subscription_id,
+                    SeenAdRow.ad_id.in_(unique_ids),
+                )
+            ).all()
+        )
+        for ad_id in unique_ids:
+            if ad_id in existing:
+                session.execute(
+                    SeenAdRow.__table__.update()
+                    .where(
+                        SeenAdRow.subscription_id == subscription_id,
+                        SeenAdRow.ad_id == ad_id,
+                    )
+                    .values(seen_at=seen_at)
+                )
+                continue
+            session.add(
+                SeenAdRow(
+                    subscription_id=subscription_id,
+                    ad_id=ad_id,
+                    seen_at=seen_at,
+                )
+            )
+
+    def _prune_seen_for_subscription(
+        self,
+        session: Session,
+        subscription_id: int,
+        cutoff: datetime | None = None,
+    ) -> None:
+        """Prune one subscription's seen listings by age and count."""
+        cutoff = cutoff or datetime.now(UTC) - timedelta(days=self._seen_ttl_days)
+        session.execute(
+            delete(SeenAdRow).where(
+                SeenAdRow.subscription_id == subscription_id,
+                SeenAdRow.seen_at < cutoff,
+            )
+        )
+        keep_ids = session.scalars(
+            select(SeenAdRow.ad_id)
+            .where(SeenAdRow.subscription_id == subscription_id)
+            .order_by(SeenAdRow.seen_at.desc())
+            .limit(self._max_seen_per_chat)
+        ).all()
+        if keep_ids:
+            session.execute(
+                delete(SeenAdRow).where(
+                    SeenAdRow.subscription_id == subscription_id,
+                    SeenAdRow.ad_id.not_in(keep_ids),
+                )
+            )
 
     def _migrate_legacy_json(self) -> None:
         """Import profiles from the previous JSON storage file once."""
         if self._legacy_json_path is None or not self._legacy_json_path.exists():
             return
-        marker_path = self._path.with_suffix(self._path.suffix + ".json_migrated")
+        marker_path = Path(str(self._legacy_json_path) + ".sqlalchemy_migrated")
         if marker_path.exists():
             return
         data = json.loads(self._legacy_json_path.read_text(encoding="utf-8"))
@@ -239,40 +323,20 @@ class BotStorage:
             self.update(profile)
         marker_path.write_text(_now_iso(), encoding="utf-8")
 
-    def _prune_seen_limit(self, chat_id: int) -> None:
-        """Keep only the newest configured number of seen ids for one chat."""
-        self._connection.execute(
-            PRUNE_SEEN_LIMIT_SQL,
-            (chat_id, chat_id, self._max_seen_per_chat),
-        )
 
-    def _fetch_profile_row(self, chat_id: int) -> sqlite3.Row | None:
-        """Fetch one raw profile row by chat id."""
-        return self._connection.execute(SELECT_PROFILE_SQL, (chat_id,)).fetchone()
+def _create_engine(database_url: str) -> Engine:
+    """Create a SQLAlchemy engine with SQLite-friendly defaults."""
+    connect_args = (
+        {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+    )
+    return create_engine(database_url, connect_args=connect_args, future=True)
 
-    def _profile_from_row(self, row: sqlite3.Row) -> UserProfile:
-        """Convert one SQLite row into a domain profile object."""
-        chat_id = int(row["chat_id"])
-        return UserProfile(
-            chat_id=chat_id,
-            enabled=bool(row["enabled"]),
-            watch_started_at=_datetime_from_db(row["watch_started_at"]),
-            request=_request_from_json(row["request_json"]),
-            seen_ids=self.recent_seen_ids(chat_id),
-        )
 
-    def _upsert_profile(self, profile: UserProfile) -> None:
-        """Persist profile settings without touching seen listing ids."""
-        self._connection.execute(
-            UPSERT_PROFILE_SQL,
-            (
-                profile.chat_id,
-                int(profile.enabled),
-                _datetime_to_db(profile.watch_started_at),
-                _request_to_json(profile.request),
-                _now_iso(),
-            ),
-        )
+def _normalize_database_url(value: str) -> str:
+    """Accept full SQLAlchemy URLs and legacy filesystem paths."""
+    if "://" in value:
+        return value
+    return f"sqlite:///{value}"
 
 
 def _request_to_json(request: SearchRequest) -> str:
@@ -280,18 +344,8 @@ def _request_to_json(request: SearchRequest) -> str:
     return json.dumps(asdict(request), ensure_ascii=False, separators=(",", ":"))
 
 
-def _select_seen_ad_ids_sql(count: int) -> str:
-    """Build a safe ``IN`` query with exactly ``count`` SQLite placeholders."""
-    placeholders = ",".join("?" for _ in range(count))
-    return f"""
-    SELECT ad_id
-    FROM seen_ads
-    WHERE chat_id = ? AND ad_id IN ({placeholders})
-    """
-
-
 def _request_from_json(value: str) -> SearchRequest:
-    """Deserialize SearchRequest from JSON stored in SQLite."""
+    """Deserialize SearchRequest from JSON stored in the database."""
     data = json.loads(value)
     return SearchRequest(**data)
 
@@ -311,17 +365,25 @@ def _profile_from_legacy_dict(data: dict[str, object]) -> UserProfile:
 
 
 def _now_iso() -> str:
-    """Return a timezone-aware timestamp for database rows."""
+    """Return a timezone-aware timestamp for marker files."""
     return datetime.now(UTC).isoformat()
 
 
-def _datetime_to_db(value: datetime | None) -> str | None:
-    """Serialize optional datetimes for SQLite storage."""
-    return value.isoformat() if value else None
-
-
-def _datetime_from_db(value: str | None) -> datetime | None:
-    """Deserialize optional datetimes from SQLite storage."""
-    if not value:
+def _datetime_to_db(value: datetime | None) -> datetime | None:
+    """Normalize optional datetimes for database storage."""
+    if value is None:
         return None
-    return datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _datetime_from_db(value: datetime | str | None) -> datetime | None:
+    """Deserialize optional datetimes from database storage."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

@@ -51,7 +51,7 @@ router = Router()
 T = TypeVar("T")
 profile_locks: dict[int, asyncio.Lock] = {}
 storage = BotStorage(
-    settings.bot_db_path,
+    settings.database_url,
     legacy_json_path=settings.legacy_bot_state_path,
     seen_ttl_days=settings.seen_ttl_days,
     max_seen_per_chat=settings.max_seen_per_chat,

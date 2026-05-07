@@ -57,7 +57,8 @@ After `/start`, use the buttons:
 - `search_catalog.py` lists bot-visible search targets and filter presets.
 - `telegram_formatting.py` builds Telegram-safe listing cards and captions.
 - `telegram_bot.py` contains aiogram handlers and background monitoring.
-- `bot_storage.py` stores chat settings and seen listing ids in SQLite.
+- `db.py` defines SQLAlchemy tables for chats, subscriptions, seen ads, and logs.
+- `bot_storage.py` stores chat settings and seen listing ids through SQLAlchemy.
 
 To add a new parser target, start with `search_catalog.py`, then teach
 `client.py`/`parser.py` how to build and parse that target if its data shape
@@ -65,10 +66,12 @@ differs from real estate listings.
 
 ## Storage
 
-The bot uses SQLite by default:
+The bot uses SQLAlchemy with SQLite by default and can run on PostgreSQL by
+changing `KUFARPARS_DATABASE_URL`:
 
 ```env
-KUFARPARS_BOT_DB_PATH=data/kufarpars.sqlite3
+KUFARPARS_DATABASE_URL=sqlite:///data/kufarpars.sqlite3
+# KUFARPARS_DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/kufarpars
 KUFARPARS_SEEN_TTL_DAYS=60
 KUFARPARS_MAX_SEEN_PER_CHAT=5000
 KUFARPARS_BOT_MAX_NOTIFICATIONS_PER_CHECK=5
@@ -83,8 +86,16 @@ KUFARPARS_BOT_PREVIEW_IMAGE_URL=https://placehold.co/1200x800/png?text=Kufar+Pre
 
 Tables:
 
-- `profiles` stores chat settings and the serialized search request.
-- `seen_ads` stores sent/seen listing ids with a unique `(chat_id, ad_id)` key.
+- `chats` stores Telegram chats.
+- `subscriptions` stores saved search settings and the serialized search request.
+- `seen_ads` stores seen listing ids per subscription.
+- `notification_logs` stores notification send attempts for diagnostics.
+
+Schema migrations are managed with Alembic:
+
+```bash
+alembic upgrade head
+```
 
 Old JSON state from `data/kufarpars_bot_state.json` is imported once when
 `KUFARPARS_LEGACY_BOT_STATE_PATH` points to it.

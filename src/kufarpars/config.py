@@ -30,7 +30,7 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TELEGRAM_BOT_TOKEN",
     )
-    bot_db_path: str = "data/kufarpars.sqlite3"
+    database_url: str = "sqlite:///data/kufarpars.sqlite3"
     legacy_bot_state_path: str | None = "data/kufarpars_bot_state.json"
     seen_ttl_days: int = Field(default=60, ge=1)
     max_seen_per_chat: int = Field(default=5000, ge=1)
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     @field_validator(
         "realty_url",
         "user_agent",
-        "bot_db_path",
+        "database_url",
         "bot_display_timezone",
         "bot_preview_image_url",
     )
