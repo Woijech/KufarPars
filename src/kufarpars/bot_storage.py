@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from kufarpars.client import SearchRequest
+
+
+@dataclass
+class UserProfile:
+    chat_id: int
+    enabled: bool = False
+    request: SearchRequest = field(default_factory=SearchRequest)
+    seen_ids: list[int] = field(default_factory=list)
+
+
+class BotStorage:
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._profiles: dict[int, UserProfile] = {}
+        self.load()
+
+    def load(self) -> None:
+        if not self._path.exists():
+            return
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        profiles = data.get("profiles") or {}
+        self._profiles = {
+            int(chat_id): _profile_from_dict(item)
+            for chat_id, item in profiles.items()
+        }
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "profiles": {
+                str(chat_id): _profile_to_dict(profile)
+                for chat_id, profile in self._profiles.items()
+            }
+        }
+        self._path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def get(self, chat_id: int) -> UserProfile:
+        if chat_id not in self._profiles:
+            self._profiles[chat_id] = UserProfile(chat_id=chat_id)
+            self.save()
+        return self._profiles[chat_id]
+
+    def update(self, profile: UserProfile) -> None:
+        self._profiles[profile.chat_id] = profile
+        self.save()
+
+    def all_enabled(self) -> list[UserProfile]:
+        return [profile for profile in self._profiles.values() if profile.enabled]
+
+
+def _profile_to_dict(profile: UserProfile) -> dict[str, object]:
+    data = asdict(profile)
+    data["request"] = asdict(profile.request)
+    return data
+
+
+def _profile_from_dict(data: dict[str, object]) -> UserProfile:
+    request_data = data.get("request") or {}
+    if not isinstance(request_data, dict):
+        request_data = {}
+    return UserProfile(
+        chat_id=int(data["chat_id"]),
+        enabled=bool(data.get("enabled")),
+        request=SearchRequest(**request_data),
+        seen_ids=[int(item) for item in data.get("seen_ids", [])],
+    )
