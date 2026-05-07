@@ -13,9 +13,96 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 from kufarpars.client import SearchRequest
+
+SCHEMA_SQL = """
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS profiles (
+    chat_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    watch_started_at TEXT,
+    request_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS seen_ads (
+    chat_id INTEGER NOT NULL,
+    ad_id INTEGER NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, ad_id),
+    FOREIGN KEY (chat_id) REFERENCES profiles(chat_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_seen_ads_chat_seen_at
+    ON seen_ads(chat_id, seen_at DESC);
+"""
+
+SELECT_PROFILE_SQL = """
+SELECT chat_id, enabled, watch_started_at, request_json
+FROM profiles
+WHERE chat_id = ?
+"""
+
+UPSERT_PROFILE_SQL = """
+INSERT INTO profiles (
+    chat_id,
+    enabled,
+    watch_started_at,
+    request_json,
+    updated_at
+)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(chat_id) DO UPDATE SET
+    enabled = excluded.enabled,
+    watch_started_at = excluded.watch_started_at,
+    request_json = excluded.request_json,
+    updated_at = excluded.updated_at
+"""
+
+SELECT_ENABLED_PROFILES_SQL = """
+SELECT chat_id, enabled, watch_started_at, request_json
+FROM profiles
+WHERE enabled = 1
+"""
+
+SELECT_RECENT_SEEN_IDS_SQL = """
+SELECT ad_id
+FROM seen_ads
+WHERE chat_id = ?
+ORDER BY seen_at DESC
+LIMIT ?
+"""
+
+UPSERT_SEEN_AD_SQL = """
+INSERT INTO seen_ads (chat_id, ad_id, seen_at)
+VALUES (?, ?, ?)
+ON CONFLICT(chat_id, ad_id) DO UPDATE SET seen_at = excluded.seen_at
+"""
+
+DELETE_SEEN_BY_CHAT_SQL = "DELETE FROM seen_ads WHERE chat_id = ?"
+DELETE_OLD_SEEN_SQL = "DELETE FROM seen_ads WHERE seen_at < ?"
+DELETE_OLD_SEEN_BY_CHAT_SQL = """
+DELETE FROM seen_ads
+WHERE seen_at < ? AND chat_id = ?
+"""
+
+PRUNE_SEEN_LIMIT_SQL = """
+DELETE FROM seen_ads
+WHERE chat_id = ?
+  AND ad_id NOT IN (
+      SELECT ad_id
+      FROM seen_ads
+      WHERE chat_id = ?
+      ORDER BY seen_at DESC
+      LIMIT ?
+  )
+"""
+
+PROFILE_COLUMNS_SQL = "PRAGMA table_info(profiles)"
+ADD_WATCH_STARTED_AT_SQL = "ALTER TABLE profiles ADD COLUMN watch_started_at TEXT"
 
 
 @dataclass
@@ -56,86 +143,29 @@ class BotStorage:
 
     def get(self, chat_id: int) -> UserProfile:
         """Return an existing profile or create a new default one."""
-        row = self._connection.execute(
-            """
-            SELECT chat_id, enabled, watch_started_at, request_json
-            FROM profiles
-            WHERE chat_id = ?
-            """,
-            (chat_id,),
-        ).fetchone()
+        row = self._fetch_profile_row(chat_id)
         if row is None:
             profile = UserProfile(chat_id=chat_id)
             self.update(profile)
             return profile
-        return UserProfile(
-            chat_id=int(row["chat_id"]),
-            enabled=bool(row["enabled"]),
-            watch_started_at=_datetime_from_db(row["watch_started_at"]),
-            request=_request_from_json(row["request_json"]),
-            seen_ids=self.recent_seen_ids(chat_id),
-        )
+        return self._profile_from_row(row)
 
     def update(self, profile: UserProfile) -> None:
         """Upsert profile settings and optionally persist provided seen ids."""
-        self._connection.execute(
-            """
-            INSERT INTO profiles (
-                chat_id,
-                enabled,
-                watch_started_at,
-                request_json,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                enabled = excluded.enabled,
-                watch_started_at = excluded.watch_started_at,
-                request_json = excluded.request_json,
-                updated_at = excluded.updated_at
-            """,
-            (
-                profile.chat_id,
-                int(profile.enabled),
-                _datetime_to_db(profile.watch_started_at),
-                _request_to_json(profile.request),
-                _now_iso(),
-            ),
-        )
+        self._upsert_profile(profile)
         if profile.seen_ids:
             self.mark_seen(profile.chat_id, profile.seen_ids)
         self._connection.commit()
 
     def all_enabled(self) -> list[UserProfile]:
         """Return all profiles with background monitoring enabled."""
-        rows = self._connection.execute(
-            """
-            SELECT chat_id, enabled, watch_started_at, request_json
-            FROM profiles
-            WHERE enabled = 1
-            """
-        ).fetchall()
-        return [
-            UserProfile(
-                chat_id=int(row["chat_id"]),
-                enabled=bool(row["enabled"]),
-                watch_started_at=_datetime_from_db(row["watch_started_at"]),
-                request=_request_from_json(row["request_json"]),
-                seen_ids=self.recent_seen_ids(int(row["chat_id"])),
-            )
-            for row in rows
-        ]
+        rows = self._connection.execute(SELECT_ENABLED_PROFILES_SQL).fetchall()
+        return [self._profile_from_row(row) for row in rows]
 
     def recent_seen_ids(self, chat_id: int, limit: int | None = None) -> list[int]:
         """Return recent seen listing ids for one chat."""
         rows = self._connection.execute(
-            """
-            SELECT ad_id
-            FROM seen_ads
-            WHERE chat_id = ?
-            ORDER BY seen_at DESC
-            LIMIT ?
-            """,
+            SELECT_RECENT_SEEN_IDS_SQL,
             (chat_id, limit or self._max_seen_per_chat),
         ).fetchall()
         return [int(row["ad_id"]) for row in rows]
@@ -147,11 +177,7 @@ class BotStorage:
         seen_at = _now_iso()
         unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
         self._connection.executemany(
-            """
-            INSERT INTO seen_ads (chat_id, ad_id, seen_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(chat_id, ad_id) DO UPDATE SET seen_at = excluded.seen_at
-            """,
+            UPSERT_SEEN_AD_SQL,
             [(chat_id, ad_id, seen_at) for ad_id in unique_ids],
         )
         self.prune_seen(chat_id)
@@ -161,78 +187,44 @@ class BotStorage:
         """Return ids from ``ad_ids`` that have not been seen for this chat."""
         if not ad_ids:
             return []
-        placeholders = ",".join("?" for _ in ad_ids)
+        unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
         rows = self._connection.execute(
-            f"""
-            SELECT ad_id
-            FROM seen_ads
-            WHERE chat_id = ? AND ad_id IN ({placeholders})
-            """,
-            [chat_id, *ad_ids],
+            _select_seen_ad_ids_sql(len(unique_ids)),
+            [chat_id, *unique_ids],
         ).fetchall()
         seen = {int(row["ad_id"]) for row in rows}
         return [ad_id for ad_id in ad_ids if ad_id not in seen]
 
     def reset_seen(self, chat_id: int) -> None:
         """Delete seen listing ids for one chat, usually after filter changes."""
-        self._connection.execute("DELETE FROM seen_ads WHERE chat_id = ?", (chat_id,))
+        self._connection.execute(DELETE_SEEN_BY_CHAT_SQL, (chat_id,))
         self._connection.commit()
 
     def prune_seen(self, chat_id: int | None = None) -> None:
         """Remove old and excessive seen-id rows to keep SQLite small."""
         cutoff = datetime.now(UTC) - timedelta(days=self._seen_ttl_days)
-        params: list[Any] = [cutoff.isoformat()]
-        where_chat = ""
         if chat_id is not None:
-            where_chat = "AND chat_id = ?"
-            params.append(chat_id)
-        self._connection.execute(
-            f"DELETE FROM seen_ads WHERE seen_at < ? {where_chat}",
-            params,
-        )
-        if chat_id is not None:
+            self._connection.execute(
+                DELETE_OLD_SEEN_BY_CHAT_SQL,
+                (cutoff.isoformat(), chat_id),
+            )
             self._prune_seen_limit(chat_id)
+            return
+        self._connection.execute(DELETE_OLD_SEEN_SQL, (cutoff.isoformat(),))
 
     def _initialize(self) -> None:
         """Create tables and indexes if they do not exist."""
-        self._connection.executescript(
-            """
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS profiles (
-                chat_id INTEGER PRIMARY KEY,
-                enabled INTEGER NOT NULL DEFAULT 0,
-                watch_started_at TEXT,
-                request_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS seen_ads (
-                chat_id INTEGER NOT NULL,
-                ad_id INTEGER NOT NULL,
-                seen_at TEXT NOT NULL,
-                PRIMARY KEY (chat_id, ad_id),
-                FOREIGN KEY (chat_id) REFERENCES profiles(chat_id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_seen_ads_chat_seen_at
-                ON seen_ads(chat_id, seen_at DESC);
-            """
-        )
+        self._connection.executescript(SCHEMA_SQL)
         self._ensure_profile_columns()
         self._connection.commit()
 
     def _ensure_profile_columns(self) -> None:
         """Add profile columns introduced after the initial SQLite schema."""
         columns = {
-            row["name"]
-            for row in self._connection.execute("PRAGMA table_info(profiles)")
+            row["name"] for row in self._connection.execute(PROFILE_COLUMNS_SQL)
         }
         if "watch_started_at" not in columns:
-            self._connection.execute(
-                "ALTER TABLE profiles ADD COLUMN watch_started_at TEXT"
-            )
+            self._connection.execute(ADD_WATCH_STARTED_AT_SQL)
 
     def _migrate_legacy_json(self) -> None:
         """Import profiles from the previous JSON storage file once."""
@@ -250,24 +242,52 @@ class BotStorage:
     def _prune_seen_limit(self, chat_id: int) -> None:
         """Keep only the newest configured number of seen ids for one chat."""
         self._connection.execute(
-            """
-            DELETE FROM seen_ads
-            WHERE chat_id = ?
-              AND ad_id NOT IN (
-                  SELECT ad_id
-                  FROM seen_ads
-                  WHERE chat_id = ?
-                  ORDER BY seen_at DESC
-                  LIMIT ?
-              )
-            """,
+            PRUNE_SEEN_LIMIT_SQL,
             (chat_id, chat_id, self._max_seen_per_chat),
+        )
+
+    def _fetch_profile_row(self, chat_id: int) -> sqlite3.Row | None:
+        """Fetch one raw profile row by chat id."""
+        return self._connection.execute(SELECT_PROFILE_SQL, (chat_id,)).fetchone()
+
+    def _profile_from_row(self, row: sqlite3.Row) -> UserProfile:
+        """Convert one SQLite row into a domain profile object."""
+        chat_id = int(row["chat_id"])
+        return UserProfile(
+            chat_id=chat_id,
+            enabled=bool(row["enabled"]),
+            watch_started_at=_datetime_from_db(row["watch_started_at"]),
+            request=_request_from_json(row["request_json"]),
+            seen_ids=self.recent_seen_ids(chat_id),
+        )
+
+    def _upsert_profile(self, profile: UserProfile) -> None:
+        """Persist profile settings without touching seen listing ids."""
+        self._connection.execute(
+            UPSERT_PROFILE_SQL,
+            (
+                profile.chat_id,
+                int(profile.enabled),
+                _datetime_to_db(profile.watch_started_at),
+                _request_to_json(profile.request),
+                _now_iso(),
+            ),
         )
 
 
 def _request_to_json(request: SearchRequest) -> str:
     """Serialize SearchRequest as compact JSON."""
     return json.dumps(asdict(request), ensure_ascii=False, separators=(",", ":"))
+
+
+def _select_seen_ad_ids_sql(count: int) -> str:
+    """Build a safe ``IN`` query with exactly ``count`` SQLite placeholders."""
+    placeholders = ",".join("?" for _ in range(count))
+    return f"""
+    SELECT ad_id
+    FROM seen_ads
+    WHERE chat_id = ? AND ad_id IN ({placeholders})
+    """
 
 
 def _request_from_json(value: str) -> SearchRequest:
