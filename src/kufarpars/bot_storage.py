@@ -24,6 +24,7 @@ class UserProfile:
 
     chat_id: int
     enabled: bool = False
+    watch_started_at: datetime | None = None
     request: SearchRequest = field(default_factory=SearchRequest)
     seen_ids: list[int] = field(default_factory=list)
 
@@ -56,7 +57,11 @@ class BotStorage:
     def get(self, chat_id: int) -> UserProfile:
         """Return an existing profile or create a new default one."""
         row = self._connection.execute(
-            "SELECT chat_id, enabled, request_json FROM profiles WHERE chat_id = ?",
+            """
+            SELECT chat_id, enabled, watch_started_at, request_json
+            FROM profiles
+            WHERE chat_id = ?
+            """,
             (chat_id,),
         ).fetchone()
         if row is None:
@@ -66,6 +71,7 @@ class BotStorage:
         return UserProfile(
             chat_id=int(row["chat_id"]),
             enabled=bool(row["enabled"]),
+            watch_started_at=_datetime_from_db(row["watch_started_at"]),
             request=_request_from_json(row["request_json"]),
             seen_ids=self.recent_seen_ids(chat_id),
         )
@@ -74,16 +80,24 @@ class BotStorage:
         """Upsert profile settings and optionally persist provided seen ids."""
         self._connection.execute(
             """
-            INSERT INTO profiles (chat_id, enabled, request_json, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO profiles (
+                chat_id,
+                enabled,
+                watch_started_at,
+                request_json,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 enabled = excluded.enabled,
+                watch_started_at = excluded.watch_started_at,
                 request_json = excluded.request_json,
                 updated_at = excluded.updated_at
             """,
             (
                 profile.chat_id,
                 int(profile.enabled),
+                _datetime_to_db(profile.watch_started_at),
                 _request_to_json(profile.request),
                 _now_iso(),
             ),
@@ -95,12 +109,17 @@ class BotStorage:
     def all_enabled(self) -> list[UserProfile]:
         """Return all profiles with background monitoring enabled."""
         rows = self._connection.execute(
-            "SELECT chat_id, enabled, request_json FROM profiles WHERE enabled = 1"
+            """
+            SELECT chat_id, enabled, watch_started_at, request_json
+            FROM profiles
+            WHERE enabled = 1
+            """
         ).fetchall()
         return [
             UserProfile(
                 chat_id=int(row["chat_id"]),
                 enabled=bool(row["enabled"]),
+                watch_started_at=_datetime_from_db(row["watch_started_at"]),
                 request=_request_from_json(row["request_json"]),
                 seen_ids=self.recent_seen_ids(int(row["chat_id"])),
             )
@@ -184,6 +203,7 @@ class BotStorage:
             CREATE TABLE IF NOT EXISTS profiles (
                 chat_id INTEGER PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 0,
+                watch_started_at TEXT,
                 request_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -200,7 +220,19 @@ class BotStorage:
                 ON seen_ads(chat_id, seen_at DESC);
             """
         )
+        self._ensure_profile_columns()
         self._connection.commit()
+
+    def _ensure_profile_columns(self) -> None:
+        """Add profile columns introduced after the initial SQLite schema."""
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(profiles)")
+        }
+        if "watch_started_at" not in columns:
+            self._connection.execute(
+                "ALTER TABLE profiles ADD COLUMN watch_started_at TEXT"
+            )
 
     def _migrate_legacy_json(self) -> None:
         """Import profiles from the previous JSON storage file once."""
@@ -252,6 +284,7 @@ def _profile_from_legacy_dict(data: dict[str, object]) -> UserProfile:
     return UserProfile(
         chat_id=int(data["chat_id"]),
         enabled=bool(data.get("enabled")),
+        watch_started_at=None,
         request=SearchRequest(**request_data),
         seen_ids=[int(item) for item in data.get("seen_ids", [])],
     )
@@ -260,3 +293,15 @@ def _profile_from_legacy_dict(data: dict[str, object]) -> UserProfile:
 def _now_iso() -> str:
     """Return a timezone-aware timestamp for database rows."""
     return datetime.now(UTC).isoformat()
+
+
+def _datetime_to_db(value: datetime | None) -> str | None:
+    """Serialize optional datetimes for SQLite storage."""
+    return value.isoformat() if value else None
+
+
+def _datetime_from_db(value: str | None) -> datetime | None:
+    """Deserialize optional datetimes from SQLite storage."""
+    if not value:
+        return None
+    return datetime.fromisoformat(value)

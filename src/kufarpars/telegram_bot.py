@@ -13,6 +13,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime
 from html import escape
 from sys import exit
 from typing import TypeVar
@@ -129,6 +130,7 @@ async def set_property_type(callback: CallbackQuery) -> None:
     target = target_by_code(target_code)
     profile = ensure_default_profile(callback.message.chat.id)
     profile.request = replace_request(profile.request, **target.request_patch)
+    profile.watch_started_at = datetime.now(UTC) if profile.enabled else None
     storage.reset_seen(profile.chat_id)
     profile.seen_ids = []
     storage.update(profile)
@@ -162,6 +164,7 @@ async def set_price(callback: CallbackQuery) -> None:
         min_price=price_range.min_price,
         max_price=price_range.max_price,
     )
+    profile.watch_started_at = datetime.now(UTC) if profile.enabled else None
     storage.reset_seen(profile.chat_id)
     profile.seen_ids = []
     storage.update(profile)
@@ -208,6 +211,7 @@ async def watch_on_callback(callback: CallbackQuery) -> None:
         )
         return
     profile.enabled = True
+    profile.watch_started_at = datetime.now(UTC)
     storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
     profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
     storage.update(profile)
@@ -224,6 +228,7 @@ async def watch_off_callback(callback: CallbackQuery) -> None:
     """Disable monitoring for the current chat."""
     profile = ensure_default_profile(callback.message.chat.id)
     profile.enabled = False
+    profile.watch_started_at = None
     storage.update(profile)
     await callback.message.edit_text(
         "⏸ <b>Слежение выключено</b>\n\n"
@@ -266,27 +271,33 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         logging.warning("Failed to check Kufar for chat %s", profile.chat_id)
         return
 
+    if profile.watch_started_at is None:
+        profile.watch_started_at = datetime.now(UTC)
+        storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
+        profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
+        storage.update(profile)
+        return
+
+    fresh_listings = listings_after_watch_start(profile, listings)
     unseen_ids = set(
-        storage.unseen_ids(profile.chat_id, [listing.ad_id for listing in listings])
+        storage.unseen_ids(
+            profile.chat_id,
+            [listing.ad_id for listing in fresh_listings],
+        )
     )
-    new_listings = [listing for listing in listings if listing.ad_id in unseen_ids]
+    new_listings = [
+        listing for listing in fresh_listings if listing.ad_id in unseen_ids
+    ]
     if not new_listings:
         storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
         return
 
     notification_limit = max(0, settings.bot_max_notifications_per_check)
     listings_to_send = new_listings[:notification_limit]
-    skipped_count = max(0, len(new_listings) - len(listings_to_send))
 
     enriched = await fetch_listing_details(list(reversed(listings_to_send)))
     for listing in enriched:
         await send_listing(bot, profile.chat_id, listing)
-    if skipped_count:
-        await bot.send_message(
-            profile.chat_id,
-            "Нашёл ещё новые объявления, но не стал присылать всё сразу, "
-            f"чтобы не заспамить чат. Пропущено в этом проходе: {skipped_count}.",
-        )
     storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
     profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
     storage.update(profile)
@@ -307,6 +318,21 @@ async def fetch_listings(profile: UserProfile) -> list[Listing]:
             )
 
     return await asyncio.to_thread(fetch)
+
+
+def listings_after_watch_start(
+    profile: UserProfile,
+    listings: list[Listing],
+) -> list[Listing]:
+    """Return only listings published after monitoring was enabled."""
+    if profile.watch_started_at is None:
+        return []
+    return [
+        listing
+        for listing in listings
+        if listing.published_at is not None
+        and listing.published_at > profile.watch_started_at
+    ]
 
 
 async def fetch_listing_details(listings: list[Listing]) -> list[Listing]:
