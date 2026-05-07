@@ -656,12 +656,13 @@ async def errors(event) -> None:
 
 async def run_bot() -> None:
     """Create the aiogram dispatcher and run long polling."""
-    if not settings.telegram_bot_token:
+    telegram_bot_token = settings.telegram_bot_token_value
+    if not telegram_bot_token:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN in environment or .env file.")
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     bot = Bot(
-        token=settings.telegram_bot_token,
+        token=telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dispatcher = Dispatcher()

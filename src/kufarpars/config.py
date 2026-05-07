@@ -4,77 +4,89 @@ Every setting used by the parser or bot should live here so deployment
 differences stay outside the business logic.
 """
 
-from dataclasses import dataclass
-from os import getenv
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _bool_from_env(name: str, default: bool = False) -> bool:
-    """Read a boolean environment flag from common true/false strings."""
-    value = getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+class Settings(BaseSettings):
+    """Runtime settings for KufarPars with typed environment validation."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="KUFARPARS_",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
-@dataclass(frozen=True)
-class Settings:
-    """Runtime settings for KufarPars."""
+    realty_url: str = "https://re.kufar.by"
+    timeout_seconds: float = Field(default=20, gt=0)
+    request_retries: int = Field(default=2, ge=0)
+    request_retry_delay_seconds: float = Field(default=2, ge=0)
+    user_agent: str = "KufarPars/0.1 (+local research parser)"
+    telegram_bot_token: SecretStr | None = Field(
+        default=None,
+        validation_alias="TELEGRAM_BOT_TOKEN",
+    )
+    bot_db_path: str = "data/kufarpars.sqlite3"
+    legacy_bot_state_path: str | None = "data/kufarpars_bot_state.json"
+    seen_ttl_days: int = Field(default=60, ge=1)
+    max_seen_per_chat: int = Field(default=5000, ge=1)
+    bot_poll_interval_seconds: float = Field(default=300, gt=0)
+    bot_initial_poll_delay_seconds: float = Field(default=10, ge=0)
+    bot_max_notifications_per_check: int = Field(default=5, ge=0)
+    bot_fetch_timeout_seconds: float = Field(default=8, gt=0)
+    bot_fetch_retries: int = Field(default=1, ge=0)
+    bot_fetch_retry_delay_seconds: float = Field(default=1, ge=0)
+    bot_display_timezone: str = "Europe/Minsk"
+    bot_enable_preview: bool = False
+    bot_preview_image_url: str = (
+        "https://placehold.co/1200x800/png?text=Kufar+Preview"
+    )
+    bot_max_pages: int = Field(default=1, ge=1)
+    bot_page_delay_seconds: float = Field(default=1, ge=0)
+    bot_max_images: int = Field(default=3, ge=0, le=10)
 
-    realty_url: str = getenv("KUFARPARS_REALTY_URL", "https://re.kufar.by")
-    timeout_seconds: float = float(getenv("KUFARPARS_TIMEOUT_SECONDS", "20"))
-    request_retries: int = int(getenv("KUFARPARS_REQUEST_RETRIES", "2"))
-    request_retry_delay_seconds: float = float(
-        getenv("KUFARPARS_REQUEST_RETRY_DELAY_SECONDS", "2")
+    @field_validator(
+        "realty_url",
+        "user_agent",
+        "bot_db_path",
+        "bot_display_timezone",
+        "bot_preview_image_url",
     )
-    user_agent: str = getenv(
-        "KUFARPARS_USER_AGENT",
-        "KufarPars/0.1 (+local research parser)",
-    )
-    telegram_bot_token: str | None = getenv("TELEGRAM_BOT_TOKEN")
-    bot_db_path: str = getenv(
-        "KUFARPARS_BOT_DB_PATH",
-        "data/kufarpars.sqlite3",
-    )
-    legacy_bot_state_path: str | None = getenv(
-        "KUFARPARS_LEGACY_BOT_STATE_PATH",
-        "data/kufarpars_bot_state.json",
-    )
-    seen_ttl_days: int = int(getenv("KUFARPARS_SEEN_TTL_DAYS", "60"))
-    max_seen_per_chat: int = int(getenv("KUFARPARS_MAX_SEEN_PER_CHAT", "5000"))
-    bot_poll_interval_seconds: float = float(
-        getenv("KUFARPARS_BOT_POLL_INTERVAL_SECONDS", "300")
-    )
-    bot_initial_poll_delay_seconds: float = float(
-        getenv("KUFARPARS_BOT_INITIAL_POLL_DELAY_SECONDS", "10")
-    )
-    bot_max_notifications_per_check: int = int(
-        getenv("KUFARPARS_BOT_MAX_NOTIFICATIONS_PER_CHECK", "5")
-    )
-    bot_fetch_timeout_seconds: float = float(
-        getenv("KUFARPARS_BOT_FETCH_TIMEOUT_SECONDS", "8")
-    )
-    bot_fetch_retries: int = int(getenv("KUFARPARS_BOT_FETCH_RETRIES", "1"))
-    bot_fetch_retry_delay_seconds: float = float(
-        getenv("KUFARPARS_BOT_FETCH_RETRY_DELAY_SECONDS", "1")
-    )
-    bot_display_timezone: str = getenv(
-        "KUFARPARS_BOT_DISPLAY_TIMEZONE",
-        "Europe/Minsk",
-    )
-    bot_enable_preview: bool = _bool_from_env("KUFARPARS_BOT_ENABLE_PREVIEW")
-    bot_preview_image_url: str = getenv(
-        "KUFARPARS_BOT_PREVIEW_IMAGE_URL",
-        "https://placehold.co/1200x800/png?text=Kufar+Preview",
-    )
-    bot_max_pages: int = int(getenv("KUFARPARS_BOT_MAX_PAGES", "1"))
-    bot_page_delay_seconds: float = float(
-        getenv("KUFARPARS_BOT_PAGE_DELAY_SECONDS", "1")
-    )
-    bot_max_images: int = int(getenv("KUFARPARS_BOT_MAX_IMAGES", "3"))
+    @classmethod
+    def validate_not_blank(cls, value: str) -> str:
+        """Reject blank string values that would fail later at runtime."""
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("legacy_bot_state_path", mode="before")
+    @classmethod
+    def empty_legacy_path_to_none(cls, value: object) -> object:
+        """Allow disabling legacy JSON migration with an empty env value."""
+        if value == "":
+            return None
+        return value
+
+    @field_validator("bot_display_timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        """Validate timezone names at startup instead of during formatting."""
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"unknown timezone: {value}") from error
+        return value
+
+    @property
+    def telegram_bot_token_value(self) -> str | None:
+        """Return the plain bot token only at the Telegram API boundary."""
+        if self.telegram_bot_token is None:
+            return None
+        return self.telegram_bot_token.get_secret_value()
 
 
 settings = Settings()

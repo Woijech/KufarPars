@@ -96,4 +96,7 @@ does not flood the chat with the whole backlog.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust values for local use.
+Copy `.env.example` to `.env` and adjust values for local use. Runtime
+configuration is validated with Pydantic Settings: invalid numbers, blank
+required strings, or an unknown timezone fail fast at startup, and the Telegram
+token is handled as a secret value.
