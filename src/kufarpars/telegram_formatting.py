@@ -33,26 +33,25 @@ def build_listing_presentation(
     header = listing_header(listing)
     facts = listing_facts(listing)
     description = full_description(listing)
-    url = escape(listing.url)
+    url = listing_url(listing)
     image_urls = [image.gallery_url for image in listing.images[:max_images]]
-
-    if image_urls:
-        caption = trim_for_telegram("\n".join([header, facts, url]), 900)
-        details = (
-            trim_for_telegram(description_message(description), TELEGRAM_MESSAGE_LIMIT)
-            if description
-            else None
-        )
-        return ListingPresentation(
-            caption=caption,
-            details=details,
-            image_urls=image_urls,
-        )
-
-    text_parts = [header, facts]
+    text_parts = [header]
+    if facts:
+        text_parts.append(facts)
     if description:
         text_parts.append(description_message(description))
     text_parts.append(url)
+
+    if image_urls:
+        return ListingPresentation(
+            caption=trim_for_telegram(
+                "\n\n".join(text_parts),
+                TELEGRAM_CAPTION_LIMIT,
+            ),
+            details=None,
+            image_urls=image_urls,
+        )
+
     return ListingPresentation(
         caption=trim_for_telegram("\n\n".join(text_parts), TELEGRAM_MESSAGE_LIMIT),
         details=None,
@@ -62,7 +61,7 @@ def build_listing_presentation(
 
 def listing_header(listing: Listing) -> str:
     """Build the first line of a listing notification."""
-    return f"<b>{escape(listing.price_label)}</b> | {escape(listing.title)}"
+    return f"🆕 <b>{escape(listing.price_label)}</b>\n{escape(listing.title)}"
 
 
 def listing_facts(listing: Listing) -> str:
@@ -70,14 +69,12 @@ def listing_facts(listing: Listing) -> str:
     rows = []
     specs = listing_specs(listing)
     if specs:
-        rows.append(f"<b>Параметры:</b> {escape(specs)}")
+        rows.append(f"🏡 <b>Параметры:</b> {escape(specs)}")
     if listing.short_location:
-        rows.append(f"<b>Адрес:</b> {escape(listing.short_location)}")
-    if listing.seller_name:
-        rows.append(f"<b>Контакт:</b> {escape(listing.seller_name)}")
+        rows.append(f"📍 <b>Адрес:</b> {escape(listing.short_location)}")
     if listing.published_at:
         published = listing.published_at.strftime("%d.%m.%Y %H:%M")
-        rows.append(f"<b>Опубликовано:</b> {escape(published)}")
+        rows.append(f"🕒 <b>Опубликовано:</b> {escape(published)}")
     return "\n".join(rows)
 
 
@@ -105,7 +102,12 @@ def full_description(listing: Listing) -> str | None:
 
 def description_message(description: str) -> str:
     """Format full description as a separate readable block."""
-    return f"<b>Описание:</b>\n{escape(description)}"
+    return f"📝 <b>Описание:</b>\n{escape(description)}"
+
+
+def listing_url(listing: Listing) -> str:
+    """Format the public listing URL for Telegram messages."""
+    return f"🔗 <b>Объявление:</b> {escape(listing.url)}"
 
 
 def trim_for_telegram(text: str, limit: int) -> str:

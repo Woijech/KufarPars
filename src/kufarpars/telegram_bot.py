@@ -60,7 +60,6 @@ CALLBACK_MAIN = "menu:main"
 CALLBACK_FILTERS = "menu:filters"
 CALLBACK_TYPE = "filter:type"
 CALLBACK_PRICE = "filter:price"
-CALLBACK_RUN_ONCE = "action:run_once"
 CALLBACK_WATCH_ON = "action:watch_on"
 CALLBACK_WATCH_OFF = "action:watch_off"
 CALLBACK_SETTINGS = "action:settings"
@@ -186,44 +185,6 @@ async def settings_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == CALLBACK_RUN_ONCE)
-async def run_once_callback(callback: CallbackQuery) -> None:
-    """Fetch current listings once and send several enriched examples."""
-    profile = ensure_default_profile(callback.message.chat.id)
-    await callback.answer("Проверяю Kufar...")
-    await callback.message.answer("Проверяю Kufar по выбранным фильтрам...")
-    try:
-        listings = await run_profile_check(profile, lambda: fetch_listings(profile))
-    except KufarNetworkError:
-        logging.warning("Kufar is temporarily unavailable during manual check")
-        await callback.message.answer(
-            "Kufar сейчас не отвечает или отвечает слишком медленно. "
-            "Попробуй ещё раз чуть позже.",
-            reply_markup=main_menu_keyboard(profile),
-        )
-        return
-    except ProfileCheckAlreadyRunning:
-        await callback.message.answer(
-            "Я уже проверяю Kufar по этим фильтрам. Подожди немного.",
-            reply_markup=main_menu_keyboard(profile),
-        )
-        return
-    if not listings:
-        await callback.message.answer(
-            "Ничего не нашёл по текущим фильтрам.",
-            reply_markup=main_menu_keyboard(profile),
-        )
-        return
-
-    limit = min(len(listings), 5)
-    for listing in await fetch_listing_details(listings[:limit]):
-        await answer_listing(callback.message, listing)
-    await callback.message.answer(
-        f"Показал первые {limit} из {len(listings)}.",
-        reply_markup=main_menu_keyboard(profile),
-    )
-
-
 @router.callback_query(F.data == CALLBACK_WATCH_ON)
 async def watch_on_callback(callback: CallbackQuery) -> None:
     """Enable monitoring and remember current listings as already seen."""
@@ -251,9 +212,9 @@ async def watch_on_callback(callback: CallbackQuery) -> None:
     profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
     storage.update(profile)
     await callback.message.edit_text(
-        "Слежение включено.\n"
-        "Текущие объявления запомнил, новые пришлю отдельными сообщениями.\n\n"
-        f"Запомнено объявлений: {len(profile.seen_ids)}",
+        "✅ <b>Слежение включено</b>\n\n"
+        "Текущую выдачу запомнил. Дальше буду присылать только новые объявления.\n\n"
+        f"📌 Запомнено объявлений: <b>{len(profile.seen_ids)}</b>",
         reply_markup=main_menu_keyboard(profile),
     )
 
@@ -265,7 +226,8 @@ async def watch_off_callback(callback: CallbackQuery) -> None:
     profile.enabled = False
     storage.update(profile)
     await callback.message.edit_text(
-        "Слежение выключено.",
+        "⏸ <b>Слежение выключено</b>\n\n"
+        "Фильтры сохранены, можно включить уведомления обратно в любой момент.",
         reply_markup=main_menu_keyboard(profile),
     )
     await callback.answer()
@@ -403,31 +365,6 @@ def bot_kufar_client() -> KufarClient:
     )
 
 
-async def answer_listing(message: Message, listing: Listing) -> None:
-    """Send one listing as a reply to an existing message."""
-    presentation = build_listing_presentation(
-        listing,
-        max_images=settings.bot_max_images,
-    )
-    if presentation.image_urls:
-        if len(presentation.image_urls) == 1:
-            await message.answer_photo(
-                presentation.image_urls[0],
-                caption=presentation.caption,
-            )
-            if presentation.details:
-                await message.answer(
-                    presentation.details,
-                    disable_web_page_preview=True,
-                )
-            return
-        await message.answer_media_group(media_group_from_presentation(presentation))
-        if presentation.details:
-            await message.answer(presentation.details, disable_web_page_preview=True)
-        return
-    await message.answer(presentation.caption, disable_web_page_preview=True)
-
-
 async def send_listing(bot: Bot, chat_id: int, listing: Listing) -> None:
     """Send one listing from the background notifier."""
     presentation = build_listing_presentation(
@@ -441,20 +378,8 @@ async def send_listing(bot: Bot, chat_id: int, listing: Listing) -> None:
                 presentation.image_urls[0],
                 caption=presentation.caption,
             )
-            if presentation.details:
-                await bot.send_message(
-                    chat_id,
-                    presentation.details,
-                    disable_web_page_preview=True,
-                )
             return
         await bot.send_media_group(chat_id, media_group_from_presentation(presentation))
-        if presentation.details:
-            await bot.send_message(
-                chat_id,
-                presentation.details,
-                disable_web_page_preview=True,
-            )
         return
     await bot.send_message(
         chat_id,
@@ -516,12 +441,12 @@ def main_menu_keyboard(profile: UserProfile) -> InlineKeyboardMarkup:
     """Build the main inline keyboard for navigation and monitoring actions."""
     watch_button = (
         InlineKeyboardButton(
-            text="Выключить слежение",
+            text="⏸ Выключить слежение",
             callback_data=CALLBACK_WATCH_OFF,
         )
         if profile.enabled
         else InlineKeyboardButton(
-            text="Включить слежение",
+            text="🚀 Включить слежение",
             callback_data=CALLBACK_WATCH_ON,
         )
     )
@@ -529,18 +454,17 @@ def main_menu_keyboard(profile: UserProfile) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Настроить фильтры",
+                    text="⚙️ Фильтры",
                     callback_data=CALLBACK_FILTERS,
                 )
             ],
+            [watch_button],
             [
                 InlineKeyboardButton(
-                    text="Проверить сейчас",
-                    callback_data=CALLBACK_RUN_ONCE,
+                    text="📋 Мои настройки",
+                    callback_data=CALLBACK_SETTINGS,
                 )
             ],
-            [watch_button],
-            [InlineKeyboardButton(text="Мои фильтры", callback_data=CALLBACK_SETTINGS)],
         ]
     )
 
@@ -549,9 +473,11 @@ def filters_keyboard() -> InlineKeyboardMarkup:
     """Build the filter selection keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Тип жилья", callback_data=CALLBACK_TYPE)],
-            [InlineKeyboardButton(text="Цена", callback_data=CALLBACK_PRICE)],
-            [InlineKeyboardButton(text="Назад", callback_data=CALLBACK_MAIN)],
+            [
+                InlineKeyboardButton(text="🏠 Тип жилья", callback_data=CALLBACK_TYPE),
+                InlineKeyboardButton(text="💵 Цена", callback_data=CALLBACK_PRICE),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CALLBACK_MAIN)],
         ]
     )
 
@@ -569,7 +495,7 @@ def property_type_keyboard(profile: UserProfile) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="Назад", callback_data=CALLBACK_FILTERS)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=CALLBACK_FILTERS)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -591,21 +517,22 @@ def price_keyboard(profile: UserProfile) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="Назад", callback_data=CALLBACK_FILTERS)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=CALLBACK_FILTERS)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def selected_label(text: str, selected: bool) -> str:
     """Mark the currently selected option in button text."""
-    return f"[x] {text}" if selected else text
+    return f"✅ {text}" if selected else text
 
 
 def main_menu_text(profile: UserProfile) -> str:
     """Format the main screen text with a short summary of active filters."""
     return (
-        "Kufar бот для аренды жилья в Минске.\n\n"
-        "Выбери фильтры кнопками, проверь выдачу и включи слежение. "
-        "Когда появится новое объявление, я пришлю его сюда.\n\n"
+        "🏡 <b>Kufar Watch</b>\n"
+        "Новые объявления по аренде в Минске без ручного просмотра выдачи.\n\n"
+        "Настрой фильтры и включи слежение. Когда появится новое объявление, "
+        "я пришлю карточку сюда.\n\n"
         f"{settings_text(profile)}"
     )
 
@@ -613,8 +540,9 @@ def main_menu_text(profile: UserProfile) -> str:
 def filters_menu_text(profile: UserProfile) -> str:
     """Format the filter menu text."""
     return (
-        "Настрой фильтры поиска.\n\n"
-        "Сейчас учитываются только тип жилья и цена.\n\n"
+        "⚙️ <b>Фильтры уведомлений</b>\n\n"
+        "Сейчас можно выбрать тип жилья и диапазон цены.\n"
+        "После изменения фильтров старые объявления будут забыты.\n\n"
         f"{settings_text(profile)}"
     )
 
@@ -624,13 +552,18 @@ def settings_text(profile: UserProfile) -> str:
     request = profile.request
     params = "&".join(f"{key}={value}" for key, value in request.params().items())
     return (
-        f"Статус: {'включено' if profile.enabled else 'выключено'}\n"
-        "Город: Минск\n"
-        "Сделка: аренда\n"
-        f"Тип жилья: {property_type_title(request)}\n"
-        f"Цена: {price_title(request)}\n"
-        f"URL: <code>{escape(request.path())}?{escape(params)}</code>"
+        f"🔔 <b>Статус:</b> {status_title(profile)}\n"
+        "📍 <b>Город:</b> Минск\n"
+        "🤝 <b>Сделка:</b> аренда\n"
+        f"🏠 <b>Тип:</b> {property_type_title(request)}\n"
+        f"💵 <b>Цена:</b> {price_title(request)}\n"
+        f"🔎 <b>Поиск:</b> <code>{escape(request.path())}?{escape(params)}</code>"
     )
+
+
+def status_title(profile: UserProfile) -> str:
+    """Convert monitoring state into a short Telegram status label."""
+    return "активно ✅" if profile.enabled else "выключено ⏸"
 
 
 def property_type_title(request: SearchRequest) -> str:
