@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from html import escape
 from sys import exit
+from typing import TypeVar
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -44,7 +47,14 @@ from kufarpars.telegram_formatting import (
 )
 
 router = Router()
-storage = BotStorage(settings.bot_state_path)
+T = TypeVar("T")
+profile_locks: dict[int, asyncio.Lock] = {}
+storage = BotStorage(
+    settings.bot_db_path,
+    legacy_json_path=settings.legacy_bot_state_path,
+    seen_ttl_days=settings.seen_ttl_days,
+    max_seen_per_chat=settings.max_seen_per_chat,
+)
 
 CALLBACK_MAIN = "menu:main"
 CALLBACK_FILTERS = "menu:filters"
@@ -120,6 +130,7 @@ async def set_property_type(callback: CallbackQuery) -> None:
     target = target_by_code(target_code)
     profile = ensure_default_profile(callback.message.chat.id)
     profile.request = replace_request(profile.request, **target.request_patch)
+    storage.reset_seen(profile.chat_id)
     profile.seen_ids = []
     storage.update(profile)
     await callback.message.edit_text(
@@ -152,6 +163,7 @@ async def set_price(callback: CallbackQuery) -> None:
         min_price=price_range.min_price,
         max_price=price_range.max_price,
     )
+    storage.reset_seen(profile.chat_id)
     profile.seen_ids = []
     storage.update(profile)
     await callback.message.edit_text(
@@ -181,12 +193,18 @@ async def run_once_callback(callback: CallbackQuery) -> None:
     await callback.answer("Проверяю Kufar...")
     await callback.message.answer("Проверяю Kufar по выбранным фильтрам...")
     try:
-        listings = await fetch_listings(profile)
+        listings = await run_profile_check(profile, lambda: fetch_listings(profile))
     except KufarNetworkError:
-        logging.exception("Kufar is temporarily unavailable")
+        logging.warning("Kufar is temporarily unavailable during manual check")
         await callback.message.answer(
             "Kufar сейчас не отвечает или отвечает слишком медленно. "
             "Попробуй ещё раз чуть позже.",
+            reply_markup=main_menu_keyboard(profile),
+        )
+        return
+    except ProfileCheckAlreadyRunning:
+        await callback.message.answer(
+            "Я уже проверяю Kufar по этим фильтрам. Подожди немного.",
             reply_markup=main_menu_keyboard(profile),
         )
         return
@@ -212,17 +230,25 @@ async def watch_on_callback(callback: CallbackQuery) -> None:
     profile = ensure_default_profile(callback.message.chat.id)
     await callback.answer("Включаю слежение...")
     try:
-        listings = await fetch_listings(profile)
+        listings = await run_profile_check(profile, lambda: fetch_listings(profile))
     except KufarNetworkError:
-        logging.exception("Kufar is temporarily unavailable")
+        logging.warning("Kufar is temporarily unavailable before enabling watch")
         await callback.message.answer(
             "Не смог проверить Kufar перед включением слежения. "
             "Попробуй включить ещё раз чуть позже.",
             reply_markup=main_menu_keyboard(profile),
         )
         return
+    except ProfileCheckAlreadyRunning:
+        await callback.message.answer(
+            "Сейчас уже идёт проверка Kufar. "
+            "Попробуй включить слежение через пару секунд.",
+            reply_markup=main_menu_keyboard(profile),
+        )
+        return
     profile.enabled = True
-    profile.seen_ids = merge_seen([], listings)
+    storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
+    profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
     storage.update(profile)
     await callback.message.edit_text(
         "Слежение включено.\n"
@@ -245,33 +271,62 @@ async def watch_off_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-async def notifier_loop(bot: Bot) -> None:
+async def notifier_loop(bot: Bot, stop_event: asyncio.Event) -> None:
     """Continuously poll Kufar and notify enabled chats about new listings."""
-    while True:
+    await sleep_or_stop(stop_event, settings.bot_initial_poll_delay_seconds)
+    while not stop_event.is_set():
         for profile in storage.all_enabled():
+            if stop_event.is_set():
+                break
             await notify_profile(bot, profile)
-        await asyncio.sleep(settings.bot_poll_interval_seconds)
+        await sleep_or_stop(stop_event, settings.bot_poll_interval_seconds)
+
+
+async def sleep_or_stop(stop_event: asyncio.Event, delay_seconds: float) -> None:
+    """Sleep until the next polling cycle or return early during shutdown."""
+    if delay_seconds <= 0:
+        return
+    with suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(stop_event.wait(), timeout=delay_seconds)
 
 
 async def notify_profile(bot: Bot, profile: UserProfile) -> None:
     """Check one profile and send only listings that were not seen before."""
     try:
-        listings = await fetch_listings(profile)
+        listings = await run_profile_check(
+            profile,
+            lambda: fetch_listings(profile),
+            skip_if_running=True,
+        )
+    except ProfileCheckAlreadyRunning:
+        return
     except KufarNetworkError:
-        logging.exception("Failed to check Kufar for chat %s", profile.chat_id)
+        logging.warning("Failed to check Kufar for chat %s", profile.chat_id)
         return
 
-    known_ids = set(profile.seen_ids)
-    new_listings = [listing for listing in listings if listing.ad_id not in known_ids]
+    unseen_ids = set(
+        storage.unseen_ids(profile.chat_id, [listing.ad_id for listing in listings])
+    )
+    new_listings = [listing for listing in listings if listing.ad_id in unseen_ids]
     if not new_listings:
-        profile.seen_ids = merge_seen(profile.seen_ids, listings)
-        storage.update(profile)
+        storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
         return
 
-    enriched = await fetch_listing_details(list(reversed(new_listings)))
+    notification_limit = max(0, settings.bot_max_notifications_per_check)
+    listings_to_send = new_listings[:notification_limit]
+    skipped_count = max(0, len(new_listings) - len(listings_to_send))
+
+    enriched = await fetch_listing_details(list(reversed(listings_to_send)))
     for listing in enriched:
         await send_listing(bot, profile.chat_id, listing)
-    profile.seen_ids = merge_seen(profile.seen_ids, listings)
+    if skipped_count:
+        await bot.send_message(
+            profile.chat_id,
+            "Нашёл ещё новые объявления, но не стал присылать всё сразу, "
+            f"чтобы не заспамить чат. Пропущено в этом проходе: {skipped_count}.",
+        )
+    storage.mark_seen(profile.chat_id, [listing.ad_id for listing in listings])
+    profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
     storage.update(profile)
 
 
@@ -280,7 +335,7 @@ async def fetch_listings(profile: UserProfile) -> list[Listing]:
 
     def fetch() -> list[Listing]:
         """Run the synchronous Kufar search client for one profile."""
-        with KufarClient() as client:
+        with bot_kufar_client() as client:
             return list(
                 client.search_pages(
                     profile.request,
@@ -298,7 +353,7 @@ async def fetch_listing_details(listings: list[Listing]) -> list[Listing]:
     def fetch() -> list[Listing]:
         """Fetch detail pages with one HTTP client for connection reuse."""
         enriched = []
-        with KufarClient() as client:
+        with bot_kufar_client() as client:
             for listing in listings:
                 try:
                     enriched.append(client.fetch_listing_detail(listing))
@@ -308,6 +363,44 @@ async def fetch_listing_details(listings: list[Listing]) -> list[Listing]:
         return enriched
 
     return await asyncio.to_thread(fetch)
+
+
+class ProfileCheckAlreadyRunning(RuntimeError):
+    """Raised when a chat already has a Kufar request in progress."""
+
+
+async def run_profile_check(
+    profile: UserProfile,
+    operation: Callable[[], Awaitable[T]],
+    *,
+    skip_if_running: bool = False,
+) -> T:
+    """Run one network operation per chat to avoid duplicate Kufar requests."""
+    lock = profile_lock(profile.chat_id)
+    if lock.locked() and skip_if_running:
+        raise ProfileCheckAlreadyRunning
+    if lock.locked():
+        raise ProfileCheckAlreadyRunning
+    async with lock:
+        return await operation()
+
+
+def profile_lock(chat_id: int) -> asyncio.Lock:
+    """Return the in-memory lock that protects one chat from parallel checks."""
+    lock = profile_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        profile_locks[chat_id] = lock
+    return lock
+
+
+def bot_kufar_client() -> KufarClient:
+    """Create a Kufar client tuned for interactive bot responsiveness."""
+    return KufarClient(
+        timeout_seconds=settings.bot_fetch_timeout_seconds,
+        retries=settings.bot_fetch_retries,
+        retry_delay_seconds=settings.bot_fetch_retry_delay_seconds,
+    )
 
 
 async def answer_listing(message: Message, listing: Listing) -> None:
@@ -417,13 +510,6 @@ def replace_request(request: SearchRequest, **changes: object) -> SearchRequest:
     }
     data.update(changes)
     return SearchRequest(**data)
-
-
-def merge_seen(seen_ids: list[int], listings: list[Listing]) -> list[int]:
-    """Merge freshly fetched listing ids into the persistent seen-id list."""
-    merged = [listing.ad_id for listing in listings]
-    merged.extend(item for item in seen_ids if item not in merged)
-    return merged[:1000]
 
 
 def main_menu_keyboard(profile: UserProfile) -> InlineKeyboardMarkup:
@@ -577,14 +663,24 @@ async def run_bot() -> None:
     if not settings.telegram_bot_token:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN in environment or .env file.")
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
-    asyncio.create_task(notifier_loop(bot))
-    await dispatcher.start_polling(bot)
+    stop_event = asyncio.Event()
+    notifier_task = asyncio.create_task(notifier_loop(bot, stop_event))
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        stop_event.set()
+        notifier_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await notifier_task
+        await bot.session.close()
+        storage.close()
 
 
 def main() -> None:
