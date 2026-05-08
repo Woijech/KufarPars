@@ -30,7 +30,7 @@ def test_settings_rejects_unknown_timezone() -> None:
 def test_settings_parses_allowed_chat_ids() -> None:
     settings = Settings(allowed_chat_ids="123, 456", _env_file=None)
 
-    assert settings.allowed_chat_ids == {123, 456}
+    assert settings.allowed_chat_id_set == {123, 456}
 
 
 def test_settings_rejects_sqlite_database_url() -> None:

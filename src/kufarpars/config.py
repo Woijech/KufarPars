@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     bot_preview_image_url: str = (
         "https://placehold.co/1200x800/png?text=Kufar+Preview"
     )
-    allowed_chat_ids: set[int] = Field(default_factory=set)
+    allowed_chat_ids: str = ""
     bot_max_pages: int = Field(default=1, ge=1)
     bot_page_delay_seconds: float = Field(default=1, ge=0)
     bot_max_images: int = Field(default=3, ge=0, le=10)
@@ -83,15 +83,22 @@ class Settings(BaseSettings):
             raise ValueError("database_url must be a PostgreSQL SQLAlchemy URL")
         return value
 
-    @field_validator("allowed_chat_ids", mode="before")
+    @field_validator("allowed_chat_ids")
     @classmethod
-    def parse_allowed_chat_ids(cls, value: object) -> object:
-        """Accept comma-separated chat ids in addition to JSON lists."""
-        if value in (None, ""):
-            return set()
-        if isinstance(value, str):
-            return {int(item.strip()) for item in value.split(",") if item.strip()}
+    def validate_allowed_chat_ids(cls, value: str) -> str:
+        """Validate comma-separated chat ids without forcing JSON syntax."""
+        if not value.strip():
+            return ""
+        for item in value.split(","):
+            int(item.strip())
         return value
+
+    @property
+    def allowed_chat_id_set(self) -> set[int]:
+        """Return Telegram chat ids allowed to use a private bot."""
+        if not self.allowed_chat_ids.strip():
+            return set()
+        return {int(item.strip()) for item in self.allowed_chat_ids.split(",")}
 
     @property
     def telegram_bot_token_value(self) -> str | None:

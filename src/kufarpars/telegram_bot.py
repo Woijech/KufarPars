@@ -134,7 +134,8 @@ def event_chat_id(event: TelegramObject) -> int | None:
 
 def is_chat_allowed(chat_id: int) -> bool:
     """Return whether a chat is allowed to use the bot."""
-    return not settings.allowed_chat_ids or chat_id in settings.allowed_chat_ids
+    allowed_chat_ids = settings.allowed_chat_id_set
+    return not allowed_chat_ids or chat_id in allowed_chat_ids
 
 
 @router.message(Command("start", "menu"))
