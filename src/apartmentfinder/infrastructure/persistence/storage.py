@@ -15,8 +15,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from kufarpars.client import SearchRequest
-from kufarpars.db import Base, ChatRow, NotificationLogRow, SeenAdRow, SubscriptionRow
+from apartmentfinder.domain.models import SearchRequest
+from apartmentfinder.infrastructure.persistence.models import (
+    Base,
+    ChatRow,
+    NotificationLogRow,
+    SeenAdRow,
+    SubscriptionRow,
+)
 
 DEFAULT_SUBSCRIPTION_TITLE = "Основной поиск"
 ListingKey = tuple[str, int]
@@ -24,7 +30,7 @@ ListingKey = tuple[str, int]
 
 @dataclass
 class SearchSubscription:
-    """A saved Kufar search with monitoring settings and recent seen listing ids."""
+    """A saved listing search with monitoring settings and recent seen ids."""
 
     chat_id: int
     id: int | None = None
@@ -428,7 +434,7 @@ class BotStorage:
         session: Session,
         chat_id: int,
     ) -> SubscriptionRow:
-        """Return the default subscription row for compatibility with current bot UI."""
+        """Return the default subscription row for the current bot UI."""
         self._ensure_chat(session, chat_id)
 
         subscription = session.scalar(
@@ -517,7 +523,7 @@ class BotStorage:
         subscription_id: int,
         ad_ids: list[int],
     ) -> None:
-        """Insert or refresh Kufar seen listing ids for one subscription."""
+        """Insert or refresh default-source seen ids for one subscription."""
         self._mark_seen_items_for_subscription(
             session,
             subscription_id,

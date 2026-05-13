@@ -32,16 +32,28 @@ from aiogram.types import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 
-from kufarpars.bot_storage import BotStorage, UserProfile
-from kufarpars.client import SearchRequest
-from kufarpars.config import settings
-from kufarpars.listing_sources import (
+from apartmentfinder.application.filtering import listing_matches_search_filters
+from apartmentfinder.application.monitoring import (
+    listing_key,
+    listings_after_watch_start,
+)
+from apartmentfinder.application.source_registry import (
     SourceNetworkError,
     enrich_listing_details,
     fetch_from_sources,
 )
-from kufarpars.models import Listing, ListingImage
-from kufarpars.search_catalog import (
+from apartmentfinder.domain.models import Listing, ListingImage, SearchRequest
+from apartmentfinder.infrastructure.config import settings
+from apartmentfinder.infrastructure.persistence.storage import BotStorage, UserProfile
+from apartmentfinder.infrastructure.source_registry import (
+    configured_source_map,
+    configured_sources,
+)
+from apartmentfinder.interfaces.telegram.formatting import (
+    ListingPresentation,
+    build_listing_presentation,
+)
+from apartmentfinder.interfaces.telegram.search_catalog import (
     DISTRICT_OPTIONS,
     METRO_OPTIONS,
     PRICE_RANGES,
@@ -55,16 +67,13 @@ from kufarpars.search_catalog import (
     target_by_code,
     target_for_request,
 )
-from kufarpars.telegram_formatting import (
-    ListingPresentation,
-    build_listing_presentation,
-)
 
 router = Router()
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 profile_locks: dict[int, asyncio.Lock] = {}
 pending_text_inputs: dict[int, tuple[int, str]] = {}
+
 
 class LazyBotStorage:
     """Initialize PostgreSQL storage only when bot code first needs it."""
@@ -183,7 +192,7 @@ async def preview_listing(message: Message, bot: Bot) -> None:
         await message.answer(
             "🧪 Preview-режим выключен.\n\n"
             "Для локального теста добавь в .env:\n"
-            "<code>KUFARPARS_BOT_ENABLE_PREVIEW=true</code>"
+            "<code>APARTMENTFINDER_BOT_ENABLE_PREVIEW=true</code>"
         )
         return
     await message.answer("🧪 Отправляю пример уведомления без запроса к сайтам.")
@@ -626,68 +635,14 @@ async def fetch_listings(profile: UserProfile) -> list[Listing]:
 
     def fetch() -> list[Listing]:
         """Run synchronous source clients for one profile."""
-        return fetch_from_sources(profile.request)
+        return fetch_from_sources(
+            profile.request,
+            configured_sources(),
+            max_pages=settings.bot_max_pages,
+            delay_seconds=settings.bot_page_delay_seconds,
+        )
 
     return await asyncio.to_thread(fetch)
-
-
-def listings_after_watch_start(
-    profile: UserProfile,
-    listings: list[Listing],
-) -> list[Listing]:
-    """Return only listings published after monitoring was enabled."""
-    if profile.watch_started_at is None:
-        return []
-    return [
-        listing
-        for listing in listings
-        if listing.published_at is None
-        or listing.published_at > profile.watch_started_at
-    ]
-
-
-def listing_matches_search_filters(listing: Listing, request: SearchRequest) -> bool:
-    """Apply app-level filters that are not always represented in source URLs."""
-    haystack = " ".join(
-        part
-        for part in [
-            listing.title,
-            listing.description,
-            listing.address,
-            " ".join(listing.metro),
-        ]
-        if part
-    ).casefold()
-    if request.rooms is not None and listing.rooms:
-        if str(request.rooms) != str(listing.rooms):
-            return False
-    if not listing_matches_price(listing, request):
-        return False
-    if request.metro and request.metro.casefold() not in haystack:
-        return False
-    if request.district and request.district.casefold() not in haystack:
-        return False
-    if any(keyword.casefold() not in haystack for keyword in request.include_keywords):
-        return False
-    return not any(
-        keyword.casefold() in haystack for keyword in request.exclude_keywords
-    )
-
-
-def listing_matches_price(listing: Listing, request: SearchRequest) -> bool:
-    """Return whether a listing price fits the configured USD range."""
-    if request.min_price is None and request.max_price is None:
-        return True
-    if listing.price_usd is None:
-        return False
-    if request.min_price is not None and listing.price_usd < request.min_price:
-        return False
-    return request.max_price is None or listing.price_usd <= request.max_price
-
-
-def listing_key(listing: Listing) -> tuple[str, int]:
-    """Return the storage identity for a listing."""
-    return (listing.source, listing.ad_id)
 
 
 def unseen_items_for_subscription(
@@ -722,7 +677,7 @@ async def fetch_listing_details(listings: list[Listing]) -> list[Listing]:
 
     def fetch() -> list[Listing]:
         """Fetch detail pages through the listing's source."""
-        return enrich_listing_details(listings)
+        return enrich_listing_details(listings, configured_source_map())
 
     return await asyncio.to_thread(fetch)
 
@@ -1221,7 +1176,7 @@ def main_menu_text(chat_id: int) -> str:
     subscriptions = storage.list_subscriptions(chat_id)
     enabled_count = sum(1 for item in subscriptions if item.enabled)
     return (
-        "🏡 <b>Rent Watch</b>\n"
+        "🏡 <b>ApartmentFinder</b>\n"
         "Новые объявления по аренде в Минске без ручного просмотра выдачи.\n\n"
         f"📌 Поисков: <b>{len(subscriptions)}</b>\n"
         f"🔔 Активно: <b>{enabled_count}</b>\n\n"
@@ -1374,7 +1329,8 @@ async def run_bot() -> None:
     except SQLAlchemyError as error:
         raise RuntimeError(
             "PostgreSQL is unavailable. For normal use run the whole stack with "
-            "`docker compose up -d --build`. Use local `kufarpars-bot` only when "
+            "`docker compose up -d --build`. Use local `apartmentfinder-bot` "
+            "only when "
             "PostgreSQL is reachable from your host on localhost:5432."
         ) from error
     bot = Bot(

@@ -12,8 +12,8 @@ from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kufarpars.config import settings
-from kufarpars.models import Listing
+from apartmentfinder.domain.models import Listing
+from apartmentfinder.infrastructure.config import settings
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024

@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 
-from kufarpars.realt_parser import parse_realt_detail_page, parse_realt_search_page
+from apartmentfinder.infrastructure.sources.realt.parser import (
+    parse_realt_detail_page,
+    parse_realt_search_page,
+)
 
 ROOM_HTML = """
 <html><body>

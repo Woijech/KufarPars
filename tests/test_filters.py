@@ -1,6 +1,9 @@
 import json
 
-from kufarpars.filters import find_filter, parse_filter_catalog
+from apartmentfinder.infrastructure.sources.kufar.filters import (
+    find_filter,
+    parse_filter_catalog,
+)
 
 
 def test_parse_filter_catalog_extracts_codes_and_options() -> None:

@@ -7,10 +7,12 @@ from time import sleep
 
 import httpx
 
-from kufarpars.client import SearchRequest
-from kufarpars.config import settings
-from kufarpars.models import Listing
-from kufarpars.realt_parser import parse_realt_detail_page, parse_realt_search_page
+from apartmentfinder.domain.models import Listing, SearchRequest
+from apartmentfinder.infrastructure.config import settings
+from apartmentfinder.infrastructure.sources.realt.parser import (
+    parse_realt_detail_page,
+    parse_realt_search_page,
+)
 
 REALT_BASE_URL = "https://realt.by"
 REALT_PATHS = {

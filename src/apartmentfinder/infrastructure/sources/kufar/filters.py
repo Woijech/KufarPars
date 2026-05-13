@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from kufarpars.parser import extract_next_data
+from apartmentfinder.infrastructure.sources.kufar.parser import extract_next_data
 
 
 @dataclass(frozen=True)

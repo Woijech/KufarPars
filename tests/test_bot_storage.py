@@ -3,19 +3,19 @@ from datetime import UTC, datetime
 
 import pytest
 
-from kufarpars.bot_storage import BotStorage
-from kufarpars.client import SearchRequest
-from kufarpars.db import Base
+from apartmentfinder.domain.models import SearchRequest
+from apartmentfinder.infrastructure.persistence.models import Base
+from apartmentfinder.infrastructure.persistence.storage import BotStorage
 
 pytestmark = pytest.mark.skipif(
-    not os.getenv("KUFARPARS_TEST_DATABASE_URL"),
-    reason="PostgreSQL storage tests need KUFARPARS_TEST_DATABASE_URL",
+    not os.getenv("APARTMENTFINDER_TEST_DATABASE_URL"),
+    reason="PostgreSQL storage tests need APARTMENTFINDER_TEST_DATABASE_URL",
 )
 
 
 def make_storage() -> BotStorage:
     """Create a clean PostgreSQL-backed storage repository for one test."""
-    storage = BotStorage(os.environ["KUFARPARS_TEST_DATABASE_URL"])
+    storage = BotStorage(os.environ["APARTMENTFINDER_TEST_DATABASE_URL"])
     Base.metadata.drop_all(storage.engine)
     Base.metadata.create_all(storage.engine)
     return storage

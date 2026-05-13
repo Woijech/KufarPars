@@ -1,0 +1,1 @@
+"""Kufar source adapter."""

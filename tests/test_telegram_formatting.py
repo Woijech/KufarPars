@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from kufarpars.models import Listing, ListingImage
-from kufarpars.telegram_formatting import build_listing_presentation
+from apartmentfinder.domain.models import Listing, ListingImage
+from apartmentfinder.interfaces.telegram.formatting import build_listing_presentation
 
 
 def test_build_listing_presentation_uses_images_and_full_description() -> None:

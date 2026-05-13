@@ -1,12 +1,11 @@
 from datetime import UTC, datetime
 
-from kufarpars.bot_storage import UserProfile
-from kufarpars.client import SearchRequest
-from kufarpars.models import Listing
-from kufarpars.telegram_bot import (
+from apartmentfinder.application.filtering import listing_matches_search_filters
+from apartmentfinder.application.monitoring import listings_after_watch_start
+from apartmentfinder.domain.models import Listing, SearchRequest
+from apartmentfinder.infrastructure.persistence.storage import UserProfile
+from apartmentfinder.interfaces.telegram.bot import (
     build_preview_listing,
-    listing_matches_search_filters,
-    listings_after_watch_start,
     parse_keywords,
     parse_price_range_text,
 )

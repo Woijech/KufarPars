@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, Tag
 
-from kufarpars.models import Listing, ListingImage, SearchResult
+from apartmentfinder.domain.models import Listing, ListingImage, SearchResult
 
 REALT_BASE_URL = "https://realt.by"
 REALT_SOURCE = "realt"

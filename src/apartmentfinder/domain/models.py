@@ -9,6 +9,29 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+ListingKey = tuple[str, int]
+
+
+@dataclass(frozen=True)
+class SearchRequest:
+    """A source-neutral saved search configured by a Telegram user."""
+
+    city: str = "minsk"
+    deal: str = "rent"
+    property_type: str = "apartment"
+    rooms: int | None = None
+    min_price: int | None = None
+    max_price: int | None = None
+    currency: str = "USD"
+    text: str | None = None
+    district: str | None = None
+    metro: str | None = None
+    include_keywords: list[str] = field(default_factory=list)
+    exclude_keywords: list[str] = field(default_factory=list)
+    sort: str = "newest"
+    size: int = 30
+    extra_params: dict[str, str] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class ListingImage:

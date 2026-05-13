@@ -13,7 +13,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from kufarpars.models import Listing, ListingImage, SearchResult
+from apartmentfinder.domain.models import Listing, ListingImage, SearchResult
 
 
 class KufarParseError(ValueError):

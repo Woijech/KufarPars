@@ -1,21 +1,27 @@
 import httpx
 import pytest
 
-from kufarpars.client import KufarClient, KufarNetworkError, SearchRequest
+from apartmentfinder.domain.models import SearchRequest
+from apartmentfinder.infrastructure.sources.kufar.client import (
+    KufarClient,
+    KufarNetworkError,
+    kufar_params,
+    kufar_path,
+)
 
 
 def test_search_request_builds_rent_url_parts() -> None:
     request = SearchRequest(rooms=2, max_price=500, text="возле метро")
 
-    assert request.path() == "/l/minsk/snyat/kvartiru/2k"
-    assert request.params()["prc"] == "r:0,500"
-    assert request.params()["query"] == "возле метро"
+    assert kufar_path(request) == "/l/minsk/snyat/kvartiru/2k"
+    assert kufar_params(request)["prc"] == "r:0,500"
+    assert kufar_params(request)["query"] == "возле метро"
 
 
 def test_search_request_builds_room_url_parts() -> None:
     request = SearchRequest(property_type="room", rooms=2)
 
-    assert request.path() == "/l/minsk/snyat/komnatu"
+    assert kufar_path(request) == "/l/minsk/snyat/komnatu"
 
 
 def test_search_request_keeps_local_only_filters_out_of_kufar_params() -> None:
@@ -26,7 +32,7 @@ def test_search_request_keeps_local_only_filters_out_of_kufar_params() -> None:
         exclude_keywords=["койко-место"],
     )
 
-    params = request.params()
+    params = kufar_params(request)
 
     assert "district" not in params
     assert "metro" not in params

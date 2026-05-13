@@ -49,7 +49,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Return to Kufar-only seen-ad uniqueness."""
+    """Return to source-agnostic seen-ad uniqueness."""
     op.drop_constraint("seen_ads_pkey", "seen_ads", type_="primary")
     op.create_primary_key("seen_ads_pkey", "seen_ads", ["subscription_id", "ad_id"])
     op.drop_column("notification_logs", "source")

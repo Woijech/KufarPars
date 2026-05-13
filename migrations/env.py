@@ -1,4 +1,4 @@
-"""Alembic environment for KufarPars database migrations."""
+"""Alembic environment for ApartmentFinder database migrations."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from kufarpars.config import settings
-from kufarpars.db import Base
+from apartmentfinder.infrastructure.config import settings
+from apartmentfinder.infrastructure.persistence.models import Base
 
 config = context.config
 if config.config_file_name is not None:

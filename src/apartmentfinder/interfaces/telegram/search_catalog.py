@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kufarpars.client import SearchRequest
+from apartmentfinder.domain.models import SearchRequest
 
 
 @dataclass(frozen=True)

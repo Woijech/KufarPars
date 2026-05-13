@@ -1,22 +1,19 @@
-"""HTTP client and search request builder for Kufar.
-
-The rest of the project should go through this module for network access. That
-keeps throttling, headers, pagination, detail-page enrichment, and future parser
-targets in one place.
-"""
+"""HTTP client and search request builder for the Kufar source adapter."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
 from time import sleep
 from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from kufarpars.config import settings
-from kufarpars.models import Listing
-from kufarpars.parser import parse_detail_page, parse_search_page
+from apartmentfinder.domain.models import Listing, SearchRequest
+from apartmentfinder.infrastructure.config import settings
+from apartmentfinder.infrastructure.sources.kufar.parser import (
+    parse_detail_page,
+    parse_search_page,
+)
 
 ROOM_PATHS = {1: "1k", 2: "2k", 3: "3k", 4: "4k"}
 DEAL_PATHS = {"rent": "snyat", "buy": "kupit"}
@@ -28,60 +25,12 @@ class KufarNetworkError(RuntimeError):
     """Raised when Kufar cannot be reached after retry attempts."""
 
 
-@dataclass(frozen=True)
-class SearchRequest:
-    """A high-level search request that can be converted into a Kufar URL."""
-
-    city: str = "minsk"
-    deal: str = "rent"
-    property_type: str = "apartment"
-    rooms: int | None = None
-    min_price: int | None = None
-    max_price: int | None = None
-    currency: str = "USD"
-    text: str | None = None
-    district: str | None = None
-    metro: str | None = None
-    include_keywords: list[str] = field(default_factory=list)
-    exclude_keywords: list[str] = field(default_factory=list)
-    sort: str = "newest"
-    size: int = 30
-    extra_params: dict[str, str] = field(default_factory=dict)
-
-    def path(self) -> str:
-        """Build the friendly Kufar path for the configured search target."""
-        deal_path = DEAL_PATHS[self.deal]
-        property_path = PROPERTY_PATHS[self.property_type]
-        parts = ["l", self.city, deal_path, property_path]
-        if self.property_type == "apartment" and self.rooms in ROOM_PATHS:
-            parts.append(ROOM_PATHS[self.rooms])
-        return "/" + "/".join(parts)
-
-    def params(self) -> dict[str, str]:
-        """Build query parameters for the configured filters."""
-        params = {
-            "cur": self.currency,
-            "size": str(self.size),
-        }
-        if self.text:
-            params["query"] = self.text
-        if self.min_price is not None or self.max_price is not None:
-            lower = self.min_price if self.min_price is not None else 0
-            upper = self.max_price if self.max_price is not None else 1_000_000_000
-            params["prc"] = f"r:{lower},{upper}"
-        sort_value = SORT_VALUES[self.sort]
-        if sort_value:
-            params["sort"] = sort_value
-        params.update(self.extra_params)
-        return params
-
-
 class KufarClient:
     """Synchronous Kufar client used by background bot jobs."""
 
     def __init__(
         self,
-        base_url: str = settings.realty_url,
+        base_url: str = settings.kufar_base_url,
         timeout_seconds: float = settings.timeout_seconds,
         retries: int = settings.request_retries,
         retry_delay_seconds: float = settings.request_retry_delay_seconds,
@@ -125,12 +74,12 @@ class KufarClient:
         delay_seconds: float = 1.0,
     ) -> Iterable[Listing]:
         """Yield listings from one or more Kufar search pages."""
-        params = request.params()
+        params = kufar_params(request)
         cursor: str | None = None
 
         for page_number in range(max_pages):
             page_params = params | ({"cursor": cursor} if cursor else {})
-            result = self.search_page(request.path(), page_params)
+            result = self.search_page(kufar_path(request), page_params)
             yield from result.listings
 
             cursor = result.next_cursor
@@ -183,3 +132,32 @@ class KufarClient:
     def path_from_url(url: str) -> str:
         """Return only the path part from an absolute Kufar URL."""
         return urlparse(url).path
+
+
+def kufar_path(request: SearchRequest) -> str:
+    """Build the friendly Kufar path for a source-neutral search request."""
+    deal_path = DEAL_PATHS[request.deal]
+    property_path = PROPERTY_PATHS[request.property_type]
+    parts = ["l", request.city, deal_path, property_path]
+    if request.property_type == "apartment" and request.rooms in ROOM_PATHS:
+        parts.append(ROOM_PATHS[request.rooms])
+    return "/" + "/".join(parts)
+
+
+def kufar_params(request: SearchRequest) -> dict[str, str]:
+    """Build Kufar query parameters for a source-neutral search request."""
+    params = {
+        "cur": request.currency,
+        "size": str(request.size),
+    }
+    if request.text:
+        params["query"] = request.text
+    if request.min_price is not None or request.max_price is not None:
+        lower = request.min_price if request.min_price is not None else 0
+        upper = request.max_price if request.max_price is not None else 1_000_000_000
+        params["prc"] = f"r:{lower},{upper}"
+    sort_value = SORT_VALUES[request.sort]
+    if sort_value:
+        params["sort"] = sort_value
+    params.update(request.extra_params)
+    return params

@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kufarpars"
+name = "apartmentfinder"
 version = "0.1.0"
-description = "Telegram bot for Kufar and Realt.by rental listing alerts."
+description = "Extensible Telegram bot for rental listing alerts."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-kufarpars-bot = "kufarpars.telegram_bot:main"
+apartmentfinder-bot = "apartmentfinder.interfaces.telegram.bot:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

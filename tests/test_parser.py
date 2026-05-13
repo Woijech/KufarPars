@@ -1,6 +1,9 @@
 import json
 
-from kufarpars.parser import parse_detail_page, parse_search_page
+from apartmentfinder.infrastructure.sources.kufar.parser import (
+    parse_detail_page,
+    parse_search_page,
+)
 
 
 def test_parse_search_page_extracts_listings() -> None:

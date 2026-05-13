@@ -53,7 +53,7 @@ class ChatRow(Base):
 
 
 class SubscriptionRow(Base):
-    """One saved Kufar search for one Telegram chat."""
+    """One saved listing search for one Telegram chat."""
 
     __tablename__ = "subscriptions"
     __table_args__ = (

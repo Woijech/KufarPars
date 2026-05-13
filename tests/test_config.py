@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from kufarpars.config import Settings
+from apartmentfinder.infrastructure.config import Settings
 
 
 def test_settings_parses_preview_bool_from_string() -> None:
@@ -46,4 +46,13 @@ def test_settings_rejects_invalid_http_proxy_scheme() -> None:
 
 def test_settings_rejects_sqlite_database_url() -> None:
     with pytest.raises(ValidationError):
-        Settings(database_url="sqlite:///data/kufarpars.sqlite3", _env_file=None)
+        Settings(database_url="sqlite:///data/apartmentfinder.sqlite3", _env_file=None)
+
+
+def test_settings_reads_new_apartmentfinder_env_prefix(monkeypatch) -> None:
+    monkeypatch.setenv("APARTMENTFINDER_BOT_MAX_IMAGES", "4")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.bot_max_images == 4
+

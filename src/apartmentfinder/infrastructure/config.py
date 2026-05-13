@@ -1,8 +1,6 @@
-"""Application configuration loaded from environment and ``.env``.
+"""Application configuration loaded from environment and ``.env``."""
 
-Every setting used by the parser or bot should live here so deployment
-differences stay outside the business logic.
-"""
+from __future__ import annotations
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -11,28 +9,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime settings for KufarPars with typed environment validation."""
+    """Runtime settings for ApartmentFinder with typed environment validation."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        env_prefix="KUFARPARS_",
+        env_prefix="APARTMENTFINDER_",
         extra="ignore",
         populate_by_name=True,
     )
 
-    realty_url: str = "https://re.kufar.by"
+    kufar_base_url: str = "https://re.kufar.by"
     timeout_seconds: float = Field(default=20, gt=0)
     request_retries: int = Field(default=2, ge=0)
     request_retry_delay_seconds: float = Field(default=2, ge=0)
-    user_agent: str = "KufarPars/0.1 (+local research parser)"
+    user_agent: str = "ApartmentFinder/0.1 (+local research parser)"
     http_proxy: str | None = None
     telegram_bot_token: SecretStr | None = Field(
         default=None,
         validation_alias="TELEGRAM_BOT_TOKEN",
     )
     database_url: str = (
-        "postgresql+psycopg://kufarpars:kufarpars@localhost:5432/kufarpars"
+        "postgresql+psycopg://apartmentfinder:apartmentfinder"
+        "@localhost:5432/apartmentfinder"
     )
     seen_ttl_days: int = Field(default=60, ge=1)
     max_seen_per_chat: int = Field(default=5000, ge=1)
@@ -45,7 +44,7 @@ class Settings(BaseSettings):
     bot_display_timezone: str = "Europe/Minsk"
     bot_enable_preview: bool = False
     bot_preview_image_url: str = (
-        "https://placehold.co/1200x800/png?text=Rent+Watch+Preview"
+        "https://placehold.co/1200x800/png?text=ApartmentFinder+Preview"
     )
     allowed_chat_ids: str = ""
     bot_max_pages: int = Field(default=1, ge=1)
@@ -53,7 +52,7 @@ class Settings(BaseSettings):
     bot_max_images: int = Field(default=3, ge=0, le=10)
 
     @field_validator(
-        "realty_url",
+        "kufar_base_url",
         "user_agent",
         "database_url",
         "bot_display_timezone",
