@@ -108,6 +108,12 @@ class SeenAdRow(Base):
         primary_key=True,
     )
     ad_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(
+        String(40),
+        primary_key=True,
+        default="kufar",
+        nullable=False,
+    )
     seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -136,6 +142,7 @@ class NotificationLogRow(Base):
         nullable=False,
     )
     ad_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(40), default="kufar", nullable=False)
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

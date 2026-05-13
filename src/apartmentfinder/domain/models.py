@@ -1,4 +1,4 @@
-"""Domain models shared by the Kufar parser and Telegram bot.
+"""Domain models shared by listing parsers and the Telegram bot.
 
 The classes in this module intentionally contain no scraping or Telegram
 knowledge. Keep them small and stable so new parsers can reuse the same output
@@ -20,11 +20,12 @@ class ListingImage:
 
 @dataclass(frozen=True)
 class Listing:
-    """Normalized listing data extracted from Kufar pages."""
+    """Normalized listing data extracted from a real-estate source."""
 
     ad_id: int
     title: str
     url: str
+    source: str = "kufar"
     price_byn: float | None = None
     price_usd: float | None = None
     currency: str | None = None
@@ -59,7 +60,7 @@ class Listing:
 
 @dataclass(frozen=True)
 class SearchResult:
-    """A single Kufar search page with pagination metadata."""
+    """A single source search page with pagination metadata."""
 
     listings: list[Listing]
     total: int | None

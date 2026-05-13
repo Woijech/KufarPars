@@ -25,6 +25,8 @@ def test_build_listing_presentation_uses_images_and_full_description() -> None:
     assert "Контакт" not in presentation.caption
     assert "Агент" not in presentation.caption
     assert "07.05.2026 23:23" in presentation.caption
+    assert "Источник" in presentation.caption
+    assert "Kufar" in presentation.caption
 
 
 def test_build_listing_presentation_without_images_uses_message_limit() -> None:

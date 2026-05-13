@@ -71,3 +71,23 @@ def test_bot_storage_supports_multiple_subscriptions() -> None:
     assert [item.title for item in subscriptions] == ["Комната", "Квартира"]
     assert storage.unseen_ids_for_subscription(first.id, [1, 3]) == [3]
     assert storage.unseen_ids_for_subscription(second.id, [1, 3]) == [1]
+
+
+def test_bot_storage_tracks_seen_items_by_source() -> None:
+    storage = make_storage()
+    subscription = storage.create_subscription(
+        123,
+        "Комната",
+        SearchRequest(property_type="room"),
+    )
+
+    storage.mark_seen_items_for_subscription(
+        subscription.id,
+        [("kufar", 1), ("realt", 1)],
+    )
+
+    assert storage.unseen_items_for_subscription(
+        subscription.id,
+        [("kufar", 1), ("realt", 1), ("realt", 2)],
+    ) == [("realt", 2)]
+    assert set(storage.recent_seen_items(123)) == {("kufar", 1), ("realt", 1)}

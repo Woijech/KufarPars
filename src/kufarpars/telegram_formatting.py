@@ -17,6 +17,7 @@ from kufarpars.models import Listing
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
+SOURCE_LABELS = {"kufar": "Kufar", "realt": "Realt"}
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,8 @@ def listing_header(listing: Listing) -> str:
 
 def listing_facts(listing: Listing) -> str:
     """Build a compact facts block with location and apartment parameters."""
-    rows = []
+    source = SOURCE_LABELS.get(listing.source, listing.source)
+    rows = [f"🌐 <b>Источник:</b> {escape(source)}"]
     specs = listing_specs(listing)
     if specs:
         rows.append(f"🏡 <b>Параметры:</b> {escape(specs)}")
@@ -114,7 +116,7 @@ def listing_url(listing: Listing) -> str:
 
 
 def format_published_at(value: datetime) -> str:
-    """Format Kufar publication time in the bot display timezone."""
+    """Format listing publication time in the bot display timezone."""
     try:
         timezone = ZoneInfo(settings.bot_display_timezone)
     except ZoneInfoNotFoundError:

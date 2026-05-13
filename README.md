@@ -1,6 +1,6 @@
 # KufarPars
 
-Telegram bot for monitoring new Kufar real-estate listings.
+Telegram bot for monitoring new Kufar and Realt.by real-estate listings.
 
 ## Quick start
 
@@ -44,10 +44,10 @@ Current bot filters:
 - include keywords: required words or phrases in title/address/description
 - exclude keywords: words or phrases that make a listing ignored
 - fixed search area: rent in Minsk
-- notifications include gallery photos when Kufar provides them
+- notifications include gallery photos when a source provides them
 - full descriptions are loaded from listing detail pages before sending
 
-For local UI testing without waiting for a new Kufar listing, enable preview
+For local UI testing without waiting for a new real listing, enable preview
 mode in `.env`, restart the bot, and send `/preview` in Telegram:
 
 ```env
@@ -71,17 +71,19 @@ Useful commands:
 ## Project structure
 
 - `models.py` contains parser-independent domain objects.
-- `client.py` owns HTTP access, pagination, and detail-page enrichment.
+- `client.py` owns Kufar HTTP access, pagination, and detail-page enrichment.
 - `parser.py` extracts search and detail data from Kufar Next.js payloads.
+- `realt_client.py` and `realt_parser.py` fetch and parse Realt.by listings.
+- `listing_sources.py` combines Kufar and Realt.by for the bot.
 - `search_catalog.py` lists bot-visible search targets and filter presets.
 - `telegram_formatting.py` builds Telegram-safe listing cards and captions.
 - `telegram_bot.py` contains aiogram handlers and background monitoring.
 - `db.py` defines SQLAlchemy tables for chats, subscriptions, seen ads, and logs.
 - `bot_storage.py` stores chat settings and seen listing ids through SQLAlchemy.
 
-To add a new parser target, start with `search_catalog.py`, then teach
-`client.py`/`parser.py` how to build and parse that target if its data shape
-differs from real estate listings.
+To add a new source, implement the same source adapter shape used in
+`listing_sources.py`, normalize data into `Listing`, and keep user filters in
+the existing bot flow.
 
 ## Storage
 
@@ -102,7 +104,7 @@ KUFARPARS_BOT_FETCH_RETRIES=1
 KUFARPARS_BOT_FETCH_RETRY_DELAY_SECONDS=1
 KUFARPARS_BOT_DISPLAY_TIMEZONE=Europe/Minsk
 KUFARPARS_BOT_ENABLE_PREVIEW=false
-KUFARPARS_BOT_PREVIEW_IMAGE_URL=https://placehold.co/1200x800/png?text=Kufar+Preview
+KUFARPARS_BOT_PREVIEW_IMAGE_URL=https://placehold.co/1200x800/png?text=Rent+Watch+Preview
 KUFARPARS_ALLOWED_CHAT_IDS=
 KUFARPARS_HTTP_PROXY=
 ```
@@ -111,7 +113,7 @@ Tables:
 
 - `chats` stores Telegram chats.
 - `subscriptions` stores multiple saved search settings per chat.
-- `seen_ads` stores seen listing ids per subscription.
+- `seen_ads` stores seen listing ids per subscription and source.
 - `notification_logs` stores notification send attempts for diagnostics.
 
 Schema migrations are managed with Alembic:

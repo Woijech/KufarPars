@@ -38,7 +38,7 @@ def test_listings_after_watch_start_keeps_only_newer_items() -> None:
     assert listings_after_watch_start(
         profile,
         [old_listing, new_listing, undated_listing],
-    ) == [new_listing]
+    ) == [new_listing, undated_listing]
 
 
 def test_listings_after_watch_start_returns_empty_without_start_time() -> None:
@@ -97,6 +97,35 @@ def test_listing_matches_search_filters_uses_keywords_and_exclusions() -> None:
     blocked = SearchRequest(exclude_keywords=["длительный срок"])
 
     assert listing_matches_search_filters(listing, blocked) is False
+
+
+def test_listing_matches_search_filters_checks_usd_price_range() -> None:
+    listing = Listing(
+        ad_id=1,
+        title="Сдам комнату",
+        url="https://example.test/1",
+        price_usd=180,
+    )
+
+    assert listing_matches_search_filters(
+        listing,
+        SearchRequest(min_price=150, max_price=250),
+    )
+    assert not listing_matches_search_filters(
+        listing,
+        SearchRequest(min_price=200, max_price=300),
+    )
+
+
+def test_listing_matches_search_filters_excludes_unknown_price_when_range_set() -> None:
+    listing = Listing(
+        ad_id=1,
+        title="Сдам комнату",
+        url="https://example.test/1",
+        price_byn=500,
+    )
+
+    assert not listing_matches_search_filters(listing, SearchRequest(max_price=250))
 
 
 def test_parse_keywords_accepts_commas_and_lines() -> None:

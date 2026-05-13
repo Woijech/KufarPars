@@ -33,8 +33,13 @@ from aiogram.types import (
 from sqlalchemy.exc import SQLAlchemyError
 
 from kufarpars.bot_storage import BotStorage, UserProfile
-from kufarpars.client import KufarClient, KufarNetworkError, SearchRequest
+from kufarpars.client import SearchRequest
 from kufarpars.config import settings
+from kufarpars.listing_sources import (
+    SourceNetworkError,
+    enrich_listing_details,
+    fetch_from_sources,
+)
 from kufarpars.models import Listing, ListingImage
 from kufarpars.search_catalog import (
     DISTRICT_OPTIONS,
@@ -181,7 +186,7 @@ async def preview_listing(message: Message, bot: Bot) -> None:
             "<code>KUFARPARS_BOT_ENABLE_PREVIEW=true</code>"
         )
         return
-    await message.answer("🧪 Отправляю пример уведомления без запроса к Kufar.")
+    await message.answer("🧪 Отправляю пример уведомления без запроса к сайтам.")
     await send_listing(bot, message.chat.id, build_preview_listing())
 
 
@@ -464,17 +469,19 @@ async def enable_subscription_watch(
     """Enable monitoring for one saved search and seed seen ids."""
     try:
         listings = await run_profile_check(profile, lambda: fetch_listings(profile))
-    except KufarNetworkError:
-        logging.warning("Kufar is temporarily unavailable before enabling watch")
+    except SourceNetworkError:
+        logging.warning(
+            "Listing sources are temporarily unavailable before enabling watch"
+        )
         await callback.message.answer(
-            "Не смог проверить Kufar перед включением слежения. "
+            "Не смог проверить источники перед включением слежения. "
             "Попробуй включить ещё раз чуть позже.",
             reply_markup=subscription_keyboard(profile),
         )
         return
     except ProfileCheckAlreadyRunning:
         await callback.message.answer(
-            "Сейчас уже идёт проверка Kufar. "
+            "Сейчас уже идёт проверка объявлений. "
             "Попробуй включить слежение через пару секунд.",
             reply_markup=subscription_keyboard(profile),
         )
@@ -486,7 +493,7 @@ async def enable_subscription_watch(
     await callback.message.edit_text(
         "✅ <b>Слежение включено</b>\n\n"
         "Текущую выдачу запомнил. Дальше буду присылать только новые объявления.\n\n"
-        f"📌 Запомнено объявлений: <b>{len(profile.seen_ids)}</b>",
+        f"📌 Запомнено объявлений: <b>{len(listings)}</b>",
         reply_markup=subscription_keyboard(profile),
     )
 
@@ -507,7 +514,7 @@ async def watch_off_callback(callback: CallbackQuery) -> None:
 
 
 async def notifier_loop(bot: Bot, stop_event: asyncio.Event) -> None:
-    """Continuously poll Kufar and notify enabled chats about new listings."""
+    """Continuously poll listing sources and notify chats about new listings."""
     await sleep_or_stop(stop_event, settings.bot_initial_poll_delay_seconds)
     while not stop_event.is_set():
         for profile in storage.all_enabled():
@@ -536,9 +543,9 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         )
     except ProfileCheckAlreadyRunning:
         return
-    except KufarNetworkError:
+    except SourceNetworkError:
         logger.warning(
-            "kufar_check_failed chat_id=%s subscription_id=%s",
+            "listing_check_failed chat_id=%s subscription_id=%s",
             profile.chat_id,
             profile.id,
         )
@@ -555,19 +562,20 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         for listing in listings_after_watch_start(profile, listings)
         if listing_matches_search_filters(listing, profile.request)
     ]
-    unseen_ids = set(
-        unseen_ids_for_subscription(
+    unseen_keys = set(
+        unseen_items_for_subscription(
             profile,
-            [listing.ad_id for listing in fresh_listings],
+            [listing_key(listing) for listing in fresh_listings],
         )
     )
     new_listings = [
-        listing for listing in fresh_listings if listing.ad_id in unseen_ids
+        listing for listing in fresh_listings if listing_key(listing) in unseen_keys
     ]
     if not new_listings:
         mark_subscription_seen(profile, listings)
         logger.info(
-            "kufar_check_no_new chat_id=%s subscription_id=%s total=%s duration_ms=%s",
+            "listing_check_no_new chat_id=%s subscription_id=%s total=%s "
+            "duration_ms=%s",
             profile.chat_id,
             profile.id,
             len(listings),
@@ -587,13 +595,23 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
     for listing in matched_enriched:
         await send_listing(bot, profile.chat_id, listing)
         if profile.id is not None:
-            storage.log_notification_for_subscription(profile.id, listing.ad_id, "sent")
+            storage.log_notification_for_subscription(
+                profile.id,
+                listing.ad_id,
+                "sent",
+                source=listing.source,
+            )
         else:
-            storage.log_notification(profile.chat_id, listing.ad_id, "sent")
+            storage.log_notification(
+                profile.chat_id,
+                listing.ad_id,
+                "sent",
+                source=listing.source,
+            )
     mark_subscription_seen(profile, listings)
     storage.update_subscription(profile)
     logger.info(
-        "kufar_notifications_sent chat_id=%s subscription_id=%s total=%s sent=%s "
+        "listing_notifications_sent chat_id=%s subscription_id=%s total=%s sent=%s "
         "duration_ms=%s",
         profile.chat_id,
         profile.id,
@@ -607,15 +625,8 @@ async def fetch_listings(profile: UserProfile) -> list[Listing]:
     """Fetch matching search-page listings without loading detail pages."""
 
     def fetch() -> list[Listing]:
-        """Run the synchronous Kufar search client for one profile."""
-        with bot_kufar_client() as client:
-            return list(
-                client.search_pages(
-                    profile.request,
-                    max_pages=settings.bot_max_pages,
-                    delay_seconds=settings.bot_page_delay_seconds,
-                )
-            )
+        """Run synchronous source clients for one profile."""
+        return fetch_from_sources(profile.request)
 
     return await asyncio.to_thread(fetch)
 
@@ -630,13 +641,13 @@ def listings_after_watch_start(
     return [
         listing
         for listing in listings
-        if listing.published_at is not None
-        and listing.published_at > profile.watch_started_at
+        if listing.published_at is None
+        or listing.published_at > profile.watch_started_at
     ]
 
 
 def listing_matches_search_filters(listing: Listing, request: SearchRequest) -> bool:
-    """Apply app-level filters that are not always represented in Kufar URL params."""
+    """Apply app-level filters that are not always represented in source URLs."""
     haystack = " ".join(
         part
         for part in [
@@ -650,6 +661,8 @@ def listing_matches_search_filters(listing: Listing, request: SearchRequest) -> 
     if request.rooms is not None and listing.rooms:
         if str(request.rooms) != str(listing.rooms):
             return False
+    if not listing_matches_price(listing, request):
+        return False
     if request.metro and request.metro.casefold() not in haystack:
         return False
     if request.district and request.district.casefold() not in haystack:
@@ -661,25 +674,41 @@ def listing_matches_search_filters(listing: Listing, request: SearchRequest) -> 
     )
 
 
-def unseen_ids_for_subscription(
+def listing_matches_price(listing: Listing, request: SearchRequest) -> bool:
+    """Return whether a listing price fits the configured USD range."""
+    if request.min_price is None and request.max_price is None:
+        return True
+    if listing.price_usd is None:
+        return False
+    if request.min_price is not None and listing.price_usd < request.min_price:
+        return False
+    return request.max_price is None or listing.price_usd <= request.max_price
+
+
+def listing_key(listing: Listing) -> tuple[str, int]:
+    """Return the storage identity for a listing."""
+    return (listing.source, listing.ad_id)
+
+
+def unseen_items_for_subscription(
     profile: UserProfile,
-    ad_ids: list[int],
-) -> list[int]:
-    """Return unseen ids for a profile, preferring subscription-specific storage."""
+    listing_keys: list[tuple[str, int]],
+) -> list[tuple[str, int]]:
+    """Return unseen source/id pairs for a profile."""
     if profile.id is not None:
-        return storage.unseen_ids_for_subscription(profile.id, ad_ids)
-    return storage.unseen_ids(profile.chat_id, ad_ids)
+        return storage.unseen_items_for_subscription(profile.id, listing_keys)
+    return storage.unseen_items(profile.chat_id, listing_keys)
 
 
 def mark_subscription_seen(profile: UserProfile, listings: list[Listing]) -> None:
     """Mark current listings as seen for one saved search."""
-    ad_ids = [listing.ad_id for listing in listings]
+    listing_keys = [listing_key(listing) for listing in listings]
     if profile.id is not None:
-        storage.mark_seen_for_subscription(profile.id, ad_ids)
+        storage.mark_seen_items_for_subscription(profile.id, listing_keys)
         refreshed = storage.get_subscription(profile.chat_id, profile.id)
         profile.seen_ids = refreshed.seen_ids
         return
-    storage.mark_seen(profile.chat_id, ad_ids)
+    storage.mark_seen_items(profile.chat_id, listing_keys)
     profile.seen_ids = storage.recent_seen_ids(profile.chat_id)
 
 
@@ -692,22 +721,14 @@ async def fetch_listing_details(listings: list[Listing]) -> list[Listing]:
     """Load full descriptions and gallery URLs only for listings being sent."""
 
     def fetch() -> list[Listing]:
-        """Fetch detail pages with one HTTP client for connection reuse."""
-        enriched = []
-        with bot_kufar_client() as client:
-            for listing in listings:
-                try:
-                    enriched.append(client.fetch_listing_detail(listing))
-                except Exception:
-                    logging.exception("Failed to enrich listing %s", listing.ad_id)
-                    enriched.append(listing)
-        return enriched
+        """Fetch detail pages through the listing's source."""
+        return enrich_listing_details(listings)
 
     return await asyncio.to_thread(fetch)
 
 
 class ProfileCheckAlreadyRunning(RuntimeError):
-    """Raised when a chat already has a Kufar request in progress."""
+    """Raised when a chat already has a source request in progress."""
 
 
 async def run_profile_check(
@@ -716,7 +737,7 @@ async def run_profile_check(
     *,
     skip_if_running: bool = False,
 ) -> T:
-    """Run one network operation per chat to avoid duplicate Kufar requests."""
+    """Run one network operation per chat to avoid duplicate source requests."""
     lock = profile_lock(profile.id or profile.chat_id)
     if lock.locked() and skip_if_running:
         raise ProfileCheckAlreadyRunning
@@ -735,15 +756,6 @@ def profile_lock(chat_id: int) -> asyncio.Lock:
     return lock
 
 
-def bot_kufar_client() -> KufarClient:
-    """Create a Kufar client tuned for interactive bot responsiveness."""
-    return KufarClient(
-        timeout_seconds=settings.bot_fetch_timeout_seconds,
-        retries=settings.bot_fetch_retries,
-        retry_delay_seconds=settings.bot_fetch_retry_delay_seconds,
-    )
-
-
 def build_preview_listing() -> Listing:
     """Build a stable fake listing for Telegram preview mode."""
     return Listing(
@@ -760,7 +772,7 @@ def build_preview_listing() -> Listing:
         description=(
             "Светлая комната в аккуратной квартире. Есть кровать, рабочий стол, "
             "шкаф, стиральная машина и быстрый интернет. До метро несколько "
-            "минут пешком. Это тестовое уведомление, оно не приходит с Kufar."
+            "минут пешком. Это тестовое уведомление, оно не приходит с сайтов."
         ),
         published_at=datetime(2026, 5, 7, 20, 23, tzinfo=UTC),
         images=[ListingImage(gallery_url=settings.bot_preview_image_url)],
@@ -1209,7 +1221,7 @@ def main_menu_text(chat_id: int) -> str:
     subscriptions = storage.list_subscriptions(chat_id)
     enabled_count = sum(1 for item in subscriptions if item.enabled)
     return (
-        "🏡 <b>Kufar Watch</b>\n"
+        "🏡 <b>Rent Watch</b>\n"
         "Новые объявления по аренде в Минске без ручного просмотра выдачи.\n\n"
         f"📌 Поисков: <b>{len(subscriptions)}</b>\n"
         f"🔔 Активно: <b>{enabled_count}</b>\n\n"

@@ -10,7 +10,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, select, text, tuple_
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,6 +19,7 @@ from kufarpars.client import SearchRequest
 from kufarpars.db import Base, ChatRow, NotificationLogRow, SeenAdRow, SubscriptionRow
 
 DEFAULT_SUBSCRIPTION_TITLE = "Основной поиск"
+ListingKey = tuple[str, int]
 
 
 @dataclass
@@ -189,10 +190,27 @@ class BotStorage:
             rows = session.scalars(
                 select(SeenAdRow.ad_id)
                 .where(SeenAdRow.subscription_id == subscription.id)
+                .where(SeenAdRow.source == "kufar")
                 .order_by(SeenAdRow.seen_at.desc())
                 .limit(limit or self._max_seen_per_chat)
             ).all()
             return [int(ad_id) for ad_id in rows]
+
+    def recent_seen_items(
+        self,
+        chat_id: int,
+        limit: int | None = None,
+    ) -> list[ListingKey]:
+        """Return recent source/id pairs for one chat."""
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            rows = session.execute(
+                select(SeenAdRow.source, SeenAdRow.ad_id)
+                .where(SeenAdRow.subscription_id == subscription.id)
+                .order_by(SeenAdRow.seen_at.desc())
+                .limit(limit or self._max_seen_per_chat)
+            ).all()
+            return [(str(source), int(ad_id)) for source, ad_id in rows]
 
     def mark_seen(self, chat_id: int, ad_ids: list[int]) -> None:
         """Insert seen listing ids using a unique key to prevent duplicates."""
@@ -202,6 +220,21 @@ class BotStorage:
             subscription = self._default_subscription(session, chat_id)
             session.flush()
             self._mark_seen_for_subscription(session, subscription.id, ad_ids)
+            self._prune_seen_for_subscription(session, subscription.id)
+            session.commit()
+
+    def mark_seen_items(self, chat_id: int, listing_keys: list[ListingKey]) -> None:
+        """Insert seen source/id pairs for one chat."""
+        if not listing_keys:
+            return
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            session.flush()
+            self._mark_seen_items_for_subscription(
+                session,
+                subscription.id,
+                listing_keys,
+            )
             self._prune_seen_for_subscription(session, subscription.id)
             session.commit()
 
@@ -218,6 +251,23 @@ class BotStorage:
             self._prune_seen_for_subscription(session, subscription_id)
             session.commit()
 
+    def mark_seen_items_for_subscription(
+        self,
+        subscription_id: int,
+        listing_keys: list[ListingKey],
+    ) -> None:
+        """Insert seen source/id pairs for one saved search."""
+        if not listing_keys:
+            return
+        with self._session_factory() as session:
+            self._mark_seen_items_for_subscription(
+                session,
+                subscription_id,
+                listing_keys,
+            )
+            self._prune_seen_for_subscription(session, subscription_id)
+            session.commit()
+
     def unseen_ids(self, chat_id: int, ad_ids: list[int]) -> list[int]:
         """Return ids from ``ad_ids`` that have not been seen for this chat."""
         if not ad_ids:
@@ -229,11 +279,35 @@ class BotStorage:
                 session.scalars(
                     select(SeenAdRow.ad_id).where(
                         SeenAdRow.subscription_id == subscription.id,
+                        SeenAdRow.source == "kufar",
                         SeenAdRow.ad_id.in_(unique_ids),
                     )
                 ).all()
             )
             return [ad_id for ad_id in ad_ids if ad_id not in seen_ids]
+
+    def unseen_items(
+        self,
+        chat_id: int,
+        listing_keys: list[ListingKey],
+    ) -> list[ListingKey]:
+        """Return source/id pairs that have not been seen for this chat."""
+        if not listing_keys:
+            return []
+        unique_keys = _unique_listing_keys(listing_keys)
+        with self._session_factory() as session:
+            subscription = self._default_subscription(session, chat_id)
+            rows = session.execute(
+                select(SeenAdRow.source, SeenAdRow.ad_id).where(
+                    SeenAdRow.subscription_id == subscription.id,
+                    tuple_(SeenAdRow.source, SeenAdRow.ad_id).in_(unique_keys),
+                )
+            ).all()
+            seen_keys = {
+                (str(source), int(ad_id))
+                for source, ad_id in rows
+            }
+            return [key for key in listing_keys if key not in seen_keys]
 
     def unseen_ids_for_subscription(
         self,
@@ -249,11 +323,34 @@ class BotStorage:
                 session.scalars(
                     select(SeenAdRow.ad_id).where(
                         SeenAdRow.subscription_id == subscription_id,
+                        SeenAdRow.source == "kufar",
                         SeenAdRow.ad_id.in_(unique_ids),
                     )
                 ).all()
             )
             return [ad_id for ad_id in ad_ids if ad_id not in seen_ids]
+
+    def unseen_items_for_subscription(
+        self,
+        subscription_id: int,
+        listing_keys: list[ListingKey],
+    ) -> list[ListingKey]:
+        """Return source/id pairs not seen by one saved search."""
+        if not listing_keys:
+            return []
+        unique_keys = _unique_listing_keys(listing_keys)
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(SeenAdRow.source, SeenAdRow.ad_id).where(
+                    SeenAdRow.subscription_id == subscription_id,
+                    tuple_(SeenAdRow.source, SeenAdRow.ad_id).in_(unique_keys),
+                )
+            ).all()
+            seen_keys = {
+                (str(source), int(ad_id))
+                for source, ad_id in rows
+            }
+            return [key for key in listing_keys if key not in seen_keys]
 
     def reset_seen(self, chat_id: int) -> None:
         """Delete seen listing ids for one chat, usually after filter changes."""
@@ -289,6 +386,7 @@ class BotStorage:
         ad_id: int,
         status: str,
         error: str | None = None,
+        source: str = "kufar",
     ) -> None:
         """Persist one notification attempt for later diagnostics."""
         with self._session_factory() as session:
@@ -297,6 +395,7 @@ class BotStorage:
                 NotificationLogRow(
                     subscription_id=subscription.id,
                     ad_id=ad_id,
+                    source=source,
                     status=status,
                     error=error,
                 )
@@ -309,6 +408,7 @@ class BotStorage:
         ad_id: int,
         status: str,
         error: str | None = None,
+        source: str = "kufar",
     ) -> None:
         """Persist one notification attempt for a saved search."""
         with self._session_factory() as session:
@@ -316,6 +416,7 @@ class BotStorage:
                 NotificationLogRow(
                     subscription_id=subscription_id,
                     ad_id=ad_id,
+                    source=source,
                     status=status,
                     error=error,
                 )
@@ -396,6 +497,7 @@ class BotStorage:
         seen_ids = session.scalars(
             select(SeenAdRow.ad_id)
             .where(SeenAdRow.subscription_id == subscription.id)
+            .where(SeenAdRow.source == "kufar")
             .order_by(SeenAdRow.seen_at.desc())
             .limit(self._max_seen_per_chat)
         ).all()
@@ -415,23 +517,39 @@ class BotStorage:
         subscription_id: int,
         ad_ids: list[int],
     ) -> None:
+        """Insert or refresh Kufar seen listing ids for one subscription."""
+        self._mark_seen_items_for_subscription(
+            session,
+            subscription_id,
+            [("kufar", ad_id) for ad_id in ad_ids],
+        )
+
+    def _mark_seen_items_for_subscription(
+        self,
+        session: Session,
+        subscription_id: int,
+        listing_keys: list[ListingKey],
+    ) -> None:
         """Insert or refresh seen listing ids for one subscription."""
         seen_at = datetime.now(UTC)
-        unique_ids = list(dict.fromkeys(int(ad_id) for ad_id in ad_ids))
-        existing = set(
-            session.scalars(
-                select(SeenAdRow.ad_id).where(
-                    SeenAdRow.subscription_id == subscription_id,
-                    SeenAdRow.ad_id.in_(unique_ids),
-                )
-            ).all()
-        )
-        for ad_id in unique_ids:
-            if ad_id in existing:
+        unique_keys = _unique_listing_keys(listing_keys)
+        existing_rows = session.execute(
+            select(SeenAdRow.source, SeenAdRow.ad_id).where(
+                SeenAdRow.subscription_id == subscription_id,
+                tuple_(SeenAdRow.source, SeenAdRow.ad_id).in_(unique_keys),
+            )
+        ).all()
+        existing = {
+            (str(source), int(ad_id))
+            for source, ad_id in existing_rows
+        }
+        for source, ad_id in unique_keys:
+            if (source, ad_id) in existing:
                 session.execute(
                     SeenAdRow.__table__.update()
                     .where(
                         SeenAdRow.subscription_id == subscription_id,
+                        SeenAdRow.source == source,
                         SeenAdRow.ad_id == ad_id,
                     )
                     .values(seen_at=seen_at)
@@ -441,6 +559,7 @@ class BotStorage:
                 SeenAdRow(
                     subscription_id=subscription_id,
                     ad_id=ad_id,
+                    source=source,
                     seen_at=seen_at,
                 )
             )
@@ -459,17 +578,18 @@ class BotStorage:
                 SeenAdRow.seen_at < cutoff,
             )
         )
-        keep_ids = session.scalars(
-            select(SeenAdRow.ad_id)
+        keep_rows = session.execute(
+            select(SeenAdRow.source, SeenAdRow.ad_id)
             .where(SeenAdRow.subscription_id == subscription_id)
             .order_by(SeenAdRow.seen_at.desc())
             .limit(self._max_seen_per_chat)
         ).all()
-        if keep_ids:
+        keep_keys = [(str(source), int(ad_id)) for source, ad_id in keep_rows]
+        if keep_keys:
             session.execute(
                 delete(SeenAdRow).where(
                     SeenAdRow.subscription_id == subscription_id,
-                    SeenAdRow.ad_id.not_in(keep_ids),
+                    tuple_(SeenAdRow.source, SeenAdRow.ad_id).not_in(keep_keys),
                 )
             )
 
@@ -495,6 +615,13 @@ def _request_from_json(value: str) -> SearchRequest:
     """Deserialize SearchRequest from JSON stored in the database."""
     data = json.loads(value)
     return SearchRequest(**data)
+
+
+def _unique_listing_keys(listing_keys: list[ListingKey]) -> list[ListingKey]:
+    """Normalize and deduplicate source/id pairs while preserving order."""
+    return list(
+        dict.fromkeys((str(source), int(ad_id)) for source, ad_id in listing_keys)
+    )
 
 
 def _datetime_to_db(value: datetime | None) -> datetime | None:

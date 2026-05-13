@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     bot_display_timezone: str = "Europe/Minsk"
     bot_enable_preview: bool = False
     bot_preview_image_url: str = (
-        "https://placehold.co/1200x800/png?text=Kufar+Preview"
+        "https://placehold.co/1200x800/png?text=Rent+Watch+Preview"
     )
     allowed_chat_ids: str = ""
     bot_max_pages: int = Field(default=1, ge=1)
