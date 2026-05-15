@@ -40,6 +40,30 @@ FLAT_HTML = """
 </body></html>
 """
 
+LIVE_TEXT_HTML = """
+<html><body>
+  <main>
+    <h1>96 объявлений</h1>
+    <div>451 р./мес.</div>
+    <div>≈ 160 $/мес.</div>
+    <div>Комната 55 м² 5/9 этаж</div>
+    <div>г. Минск, ул. Слободская, 135</div>
+    <div>Показать больше</div>
+    <div>Малиновка 15 минут</div>
+    <div>Сдается комната на длительный срок.</div>
+    <div>Контакты</div>
+    <div>7 часов назад</div>
+    <div>ID</div>
+    <div>4119308</div>
+    <div>282 р./мес.</div>
+    <div>≈ 100 $/мес.</div>
+    <div>Комната 18 м² 5/5 этаж</div>
+    <div>г. Минск, ул. Голодеда</div>
+    <div>26.09.2025 ID 3051236</div>
+  </main>
+</body></html>
+"""
+
 
 def test_parse_realt_room_search_page() -> None:
     result = parse_realt_search_page(
@@ -74,6 +98,26 @@ def test_parse_realt_flat_search_page() -> None:
     assert listing.rooms == "1"
     assert listing.area_m2 == 30
     assert listing.published_at == datetime(2026, 5, 7, 21, 0, tzinfo=UTC)
+
+
+def test_parse_realt_live_text_blocks_without_card_dom() -> None:
+    result = parse_realt_search_page(
+        LIVE_TEXT_HTML,
+        property_type="room",
+        now=datetime(2026, 5, 15, 12, 0, tzinfo=UTC),
+    )
+
+    assert result.total == 96
+    assert [listing.ad_id for listing in result.listings] == [4119308, 3051236]
+    first = result.listings[0]
+    assert first.source == "realt"
+    assert first.url == "https://realt.by/rent/room-for-long/object/4119308/"
+    assert first.price_usd == 160
+    assert first.price_byn == 451
+    assert first.rooms == "1"
+    assert first.address == "г. Минск, ул. Слободская, 135"
+    assert first.metro == ["Малиновка 15 минут"]
+    assert first.description == "Сдается комната на длительный срок."
 
 
 def test_parse_realt_detail_page_merges_meta_data() -> None:
