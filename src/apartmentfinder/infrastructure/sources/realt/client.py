@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
-from time import sleep
+from time import perf_counter, sleep
 
 import httpx
 
@@ -14,11 +15,11 @@ from apartmentfinder.infrastructure.sources.realt.parser import (
     parse_realt_search_page,
 )
 
-REALT_BASE_URL = "https://realt.by"
 REALT_PATHS = {
     "apartment": "/rent/flat-for-long/",
     "room": "/rent/room-for-long/",
 }
+logger = logging.getLogger(__name__)
 
 
 class RealtNetworkError(RuntimeError):
@@ -30,13 +31,14 @@ class RealtClient:
 
     def __init__(
         self,
-        base_url: str = REALT_BASE_URL,
+        base_url: str = settings.realt_base_url,
         timeout_seconds: float = settings.timeout_seconds,
         retries: int = settings.request_retries,
         retry_delay_seconds: float = settings.request_retry_delay_seconds,
         proxy_url: str | None = settings.http_proxy,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
         self._retries = max(retries, 0)
         self._retry_delay_seconds = max(retry_delay_seconds, 0)
         self._proxy_url = proxy_url
@@ -81,10 +83,23 @@ class RealtClient:
         for page_number in range(max_pages):
             if next_url is None:
                 break
+            logger.debug(
+                "source_page_fetch_started source=realt page=%s url=%s",
+                page_number + 1,
+                next_url,
+            )
             result = parse_realt_search_page(
                 self.fetch_url(next_url),
                 base_url=self._base_url,
                 property_type=request.property_type,
+            )
+            logger.debug(
+                "source_page_parsed source=realt page=%s count=%s total=%s "
+                "has_next=%s",
+                page_number + 1,
+                len(result.listings),
+                result.total,
+                bool(result.next_cursor),
             )
             yield from result.listings
             next_url = result.next_cursor
@@ -105,9 +120,27 @@ class RealtClient:
             url = f"{self._base_url}{url}"
         last_error: Exception | None = None
         for attempt in range(self._retries + 1):
+            started_at = perf_counter()
+            logger.debug(
+                "source_http_request_started source=realt attempt=%s url=%s "
+                "timeout_seconds=%s proxy_enabled=%s",
+                attempt + 1,
+                url,
+                self._timeout_seconds,
+                self._proxy_url is not None,
+            )
             try:
                 response = self._client.get(url)
                 response.raise_for_status()
+                logger.debug(
+                    "source_http_request_finished source=realt attempt=%s "
+                    "status_code=%s duration_ms=%s response_bytes=%s url=%s",
+                    attempt + 1,
+                    response.status_code,
+                    elapsed_ms(started_at),
+                    len(response.content),
+                    url,
+                )
                 return response.text
             except (
                 httpx.TimeoutException,
@@ -115,6 +148,16 @@ class RealtClient:
                 httpx.HTTPStatusError,
             ) as error:
                 last_error = error
+                logger.warning(
+                    "source_http_request_failed source=realt attempt=%s "
+                    "error_type=%s error=%s duration_ms=%s url=%s retrying=%s",
+                    attempt + 1,
+                    type(error).__name__,
+                    error,
+                    elapsed_ms(started_at),
+                    url,
+                    attempt < self._retries,
+                )
                 if attempt < self._retries:
                     sleep(self._retry_delay_seconds)
                     continue
@@ -124,3 +167,8 @@ class RealtClient:
     def _url(self, path: str, _params: dict[str, str]) -> str:
         """Build an absolute URL for a Realt path."""
         return f"{self._base_url}{path}"
+
+
+def elapsed_ms(started_at: float) -> int:
+    """Return elapsed milliseconds from a perf-counter timestamp."""
+    return int((perf_counter() - started_at) * 1000)

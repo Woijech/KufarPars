@@ -479,8 +479,10 @@ async def enable_subscription_watch(
     try:
         listings = await run_profile_check(profile, lambda: fetch_listings(profile))
     except SourceNetworkError:
-        logging.warning(
-            "Listing sources are temporarily unavailable before enabling watch"
+        logger.warning(
+            "watch_enable_failed_sources_unavailable chat_id=%s subscription_id=%s",
+            profile.chat_id,
+            profile.id,
         )
         await callback.message.answer(
             "Не смог проверить источники перед включением слежения. "
@@ -499,6 +501,12 @@ async def enable_subscription_watch(
     profile.watch_started_at = datetime.now(UTC)
     mark_subscription_seen(profile, listings)
     storage.update_subscription(profile)
+    logger.info(
+        "watch_enabled_seeded_seen chat_id=%s subscription_id=%s seen_count=%s",
+        profile.chat_id,
+        profile.id,
+        len(listings),
+    )
     await callback.message.edit_text(
         "✅ <b>Слежение включено</b>\n\n"
         "Текущую выдачу запомнил. Дальше буду присылать только новые объявления.\n\n"
@@ -524,9 +532,16 @@ async def watch_off_callback(callback: CallbackQuery) -> None:
 
 async def notifier_loop(bot: Bot, stop_event: asyncio.Event) -> None:
     """Continuously poll listing sources and notify chats about new listings."""
+    logger.info(
+        "notifier_loop_started initial_delay_seconds=%s poll_interval_seconds=%s",
+        settings.bot_initial_poll_delay_seconds,
+        settings.bot_poll_interval_seconds,
+    )
     await sleep_or_stop(stop_event, settings.bot_initial_poll_delay_seconds)
     while not stop_event.is_set():
-        for profile in storage.all_enabled():
+        enabled_profiles = storage.all_enabled()
+        logger.info("notifier_loop_tick enabled_profiles=%s", len(enabled_profiles))
+        for profile in enabled_profiles:
             if stop_event.is_set():
                 break
             await notify_profile(bot, profile)
@@ -544,6 +559,14 @@ async def sleep_or_stop(stop_event: asyncio.Event, delay_seconds: float) -> None
 async def notify_profile(bot: Bot, profile: UserProfile) -> None:
     """Check one profile and send only listings that were not seen before."""
     started_at = datetime.now(UTC)
+    logger.info(
+        "listing_check_started chat_id=%s subscription_id=%s property_type=%s "
+        "enabled=%s",
+        profile.chat_id,
+        profile.id,
+        profile.request.property_type,
+        profile.enabled,
+    )
     try:
         listings = await run_profile_check(
             profile,
@@ -554,9 +577,10 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         return
     except SourceNetworkError:
         logger.warning(
-            "listing_check_failed chat_id=%s subscription_id=%s",
+            "listing_check_failed chat_id=%s subscription_id=%s duration_ms=%s",
             profile.chat_id,
             profile.id,
+            elapsed_ms(started_at),
         )
         return
 
@@ -564,13 +588,22 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         profile.watch_started_at = datetime.now(UTC)
         mark_subscription_seen(profile, listings)
         storage.update_subscription(profile)
+        logger.info(
+            "listing_check_seeded_seen chat_id=%s subscription_id=%s total=%s "
+            "duration_ms=%s",
+            profile.chat_id,
+            profile.id,
+            len(listings),
+            elapsed_ms(started_at),
+        )
         return
 
-    fresh_listings = [
+    after_watch_start = listings_after_watch_start(profile, listings)
+    fresh_listings = list(
         listing
-        for listing in listings_after_watch_start(profile, listings)
+        for listing in after_watch_start
         if listing_matches_search_filters(listing, profile.request)
-    ]
+    )
     unseen_keys = set(
         unseen_items_for_subscription(
             profile,
@@ -580,20 +613,40 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
     new_listings = [
         listing for listing in fresh_listings if listing_key(listing) in unseen_keys
     ]
+    logger.info(
+        "listing_check_counts chat_id=%s subscription_id=%s total=%s "
+        "after_watch_start=%s matched_filters=%s unseen=%s limit=%s",
+        profile.chat_id,
+        profile.id,
+        len(listings),
+        len(after_watch_start),
+        len(fresh_listings),
+        len(new_listings),
+        settings.bot_max_notifications_per_check,
+    )
     if not new_listings:
         mark_subscription_seen(profile, listings)
         logger.info(
             "listing_check_no_new chat_id=%s subscription_id=%s total=%s "
-            "duration_ms=%s",
+            "matched_filters=%s duration_ms=%s",
             profile.chat_id,
             profile.id,
             len(listings),
+            len(fresh_listings),
             elapsed_ms(started_at),
         )
         return
 
     notification_limit = max(0, settings.bot_max_notifications_per_check)
     listings_to_send = new_listings[:notification_limit]
+    logger.info(
+        "listing_notifications_planned chat_id=%s subscription_id=%s new=%s "
+        "to_send=%s",
+        profile.chat_id,
+        profile.id,
+        len(new_listings),
+        len(listings_to_send),
+    )
 
     enriched = await fetch_listing_details(list(reversed(listings_to_send)))
     matched_enriched = [
@@ -602,6 +655,14 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
         if listing_matches_search_filters(listing, profile.request)
     ]
     for listing in matched_enriched:
+        logger.info(
+            "listing_notification_sending chat_id=%s subscription_id=%s "
+            "source=%s ad_id=%s",
+            profile.chat_id,
+            profile.id,
+            listing.source,
+            listing.ad_id,
+        )
         await send_listing(bot, profile.chat_id, listing)
         if profile.id is not None:
             storage.log_notification_for_subscription(
@@ -621,11 +682,12 @@ async def notify_profile(bot: Bot, profile: UserProfile) -> None:
     storage.update_subscription(profile)
     logger.info(
         "listing_notifications_sent chat_id=%s subscription_id=%s total=%s sent=%s "
-        "duration_ms=%s",
+        "matched_filters=%s duration_ms=%s",
         profile.chat_id,
         profile.id,
         len(listings),
         len(matched_enriched),
+        len(fresh_listings),
         elapsed_ms(started_at),
     )
 
@@ -1319,11 +1381,8 @@ async def run_bot() -> None:
     telegram_bot_token = settings.telegram_bot_token_value
     if not telegram_bot_token:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN in environment or .env file.")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_logging()
+    logger.info("bot_starting log_level=%s", settings.log_level)
     try:
         storage.check_connection()
     except SQLAlchemyError as error:
@@ -1352,6 +1411,17 @@ async def run_bot() -> None:
             await notifier_task
         await bot.session.close()
         storage.close()
+
+
+def configure_logging() -> None:
+    """Configure application logs for Docker-friendly stdout output."""
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    noisy_level = logging.INFO if settings.log_level == "DEBUG" else logging.WARNING
+    for logger_name in ("httpx", "httpcore", "aiogram"):
+        logging.getLogger(logger_name).setLevel(noisy_level)
 
 
 def main() -> None:

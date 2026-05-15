@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
-from time import sleep
+from time import perf_counter, sleep
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -19,6 +20,7 @@ ROOM_PATHS = {1: "1k", 2: "2k", 3: "3k", 4: "4k"}
 DEAL_PATHS = {"rent": "snyat", "buy": "kupit"}
 PROPERTY_PATHS = {"apartment": "kvartiru", "room": "komnatu"}
 SORT_VALUES = {"newest": None, "cheap": "prc.a", "expensive": "prc.d"}
+logger = logging.getLogger(__name__)
 
 
 class KufarNetworkError(RuntimeError):
@@ -37,6 +39,7 @@ class KufarClient:
         proxy_url: str | None = settings.http_proxy,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
         self._retries = max(retries, 0)
         self._retry_delay_seconds = max(retry_delay_seconds, 0)
         self._proxy_url = proxy_url
@@ -79,7 +82,21 @@ class KufarClient:
 
         for page_number in range(max_pages):
             page_params = params | ({"cursor": cursor} if cursor else {})
+            logger.debug(
+                "source_page_fetch_started source=kufar page=%s path=%s params=%s",
+                page_number + 1,
+                kufar_path(request),
+                sorted(page_params),
+            )
             result = self.search_page(kufar_path(request), page_params)
+            logger.debug(
+                "source_page_parsed source=kufar page=%s count=%s total=%s "
+                "has_next=%s",
+                page_number + 1,
+                len(result.listings),
+                result.total,
+                bool(result.next_cursor),
+            )
             yield from result.listings
 
             cursor = result.next_cursor
@@ -107,9 +124,27 @@ class KufarClient:
             url = f"{self._base_url}{url}"
         last_error: Exception | None = None
         for attempt in range(self._retries + 1):
+            started_at = perf_counter()
+            logger.debug(
+                "source_http_request_started source=kufar attempt=%s url=%s "
+                "timeout_seconds=%s proxy_enabled=%s",
+                attempt + 1,
+                url,
+                self._timeout_seconds,
+                self._proxy_url is not None,
+            )
             try:
                 response = self._client.get(url)
                 response.raise_for_status()
+                logger.debug(
+                    "source_http_request_finished source=kufar attempt=%s "
+                    "status_code=%s duration_ms=%s response_bytes=%s url=%s",
+                    attempt + 1,
+                    response.status_code,
+                    elapsed_ms(started_at),
+                    len(response.content),
+                    url,
+                )
                 return response.text
             except (
                 httpx.TimeoutException,
@@ -117,6 +152,16 @@ class KufarClient:
                 httpx.HTTPStatusError,
             ) as error:
                 last_error = error
+                logger.warning(
+                    "source_http_request_failed source=kufar attempt=%s "
+                    "error_type=%s error=%s duration_ms=%s url=%s retrying=%s",
+                    attempt + 1,
+                    type(error).__name__,
+                    error,
+                    elapsed_ms(started_at),
+                    url,
+                    attempt < self._retries,
+                )
                 if attempt < self._retries:
                     sleep(self._retry_delay_seconds)
                     continue
@@ -161,3 +206,8 @@ def kufar_params(request: SearchRequest) -> dict[str, str]:
         params["sort"] = sort_value
     params.update(request.extra_params)
     return params
+
+
+def elapsed_ms(started_at: float) -> int:
+    """Return elapsed milliseconds from a perf-counter timestamp."""
+    return int((perf_counter() - started_at) * 1000)

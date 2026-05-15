@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from apartmentfinder.application.source_registry import (
@@ -57,6 +59,21 @@ def test_fetch_from_sources_combines_multiple_sources() -> None:
     ]
 
 
+def test_fetch_from_sources_logs_successful_source(caplog) -> None:
+    sources = [
+        FakeSource(
+            "realt",
+            [Listing(ad_id=2, title="Realt", url="https://r.test/2", source="realt")],
+        ),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="apartmentfinder.application"):
+        fetch_from_sources(SearchRequest(), sources, max_pages=1, delay_seconds=0)
+
+    assert "listing_source_check_finished source=realt count=1" in caplog.text
+    assert "listing_sources_finished total=1 sources={'realt': 1}" in caplog.text
+
+
 def test_fetch_from_sources_keeps_working_when_one_source_fails() -> None:
     sources = [
         FakeSource("kufar", error=RuntimeError("blocked")),
@@ -74,6 +91,21 @@ def test_fetch_from_sources_keeps_working_when_one_source_fails() -> None:
     )
 
     assert [listing.source for listing in listings] == ["realt"]
+
+
+def test_fetch_from_sources_logs_failed_source(caplog) -> None:
+    sources = [
+        FakeSource("kufar", error=RuntimeError("blocked")),
+        FakeSource(
+            "realt",
+            [Listing(ad_id=2, title="Realt", url="https://r.test/2", source="realt")],
+        ),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="apartmentfinder.application"):
+        fetch_from_sources(SearchRequest(), sources, max_pages=1, delay_seconds=0)
+
+    assert "listing_source_failed source=kufar error_type=RuntimeError" in caplog.text
 
 
 def test_fetch_from_sources_raises_when_all_sources_fail() -> None:

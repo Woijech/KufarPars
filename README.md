@@ -76,6 +76,8 @@ need to write `APARTMENTFINDER_DATABASE_URL` in `.env`:
 POSTGRES_DB=apartmentfinder
 POSTGRES_USER=apartmentfinder
 POSTGRES_PASSWORD=change-me
+APARTMENTFINDER_KUFAR_BASE_URL=https://re.kufar.by
+APARTMENTFINDER_REALT_BASE_URL=https://realt.by
 APARTMENTFINDER_SEEN_TTL_DAYS=60
 APARTMENTFINDER_MAX_SEEN_PER_CHAT=5000
 APARTMENTFINDER_BOT_MAX_NOTIFICATIONS_PER_CHECK=5
@@ -87,6 +89,7 @@ APARTMENTFINDER_BOT_DISPLAY_TIMEZONE=Europe/Minsk
 APARTMENTFINDER_BOT_ENABLE_PREVIEW=false
 APARTMENTFINDER_ALLOWED_CHAT_IDS=
 APARTMENTFINDER_HTTP_PROXY=
+APARTMENTFINDER_LOG_LEVEL=INFO
 ```
 
 Tables:
@@ -113,6 +116,32 @@ token is handled as a secret value.
 
 Set `APARTMENTFINDER_ALLOWED_CHAT_IDS` to a comma-separated list of Telegram
 chat ids when the bot should be private.
+
+### Logging
+
+Logs are written to stdout and are visible with Docker Compose:
+
+```bash
+docker compose logs -f bot
+```
+
+Use `INFO` for normal server usage and switch to `DEBUG` while developing or
+diagnosing source parsing:
+
+```env
+APARTMENTFINDER_LOG_LEVEL=DEBUG
+```
+
+After changing `.env`, restart the bot container:
+
+```bash
+docker compose restart bot
+```
+
+Debug logs include source checks, HTTP statuses, response times, parsed listing
+counts, filter rejection reasons, and notification counts. Secrets such as the
+Telegram token, database password, proxy credentials, and full HTML responses
+are not logged.
 
 For geographic availability checks through your own proxy or gateway, set one
 explicit proxy URL:

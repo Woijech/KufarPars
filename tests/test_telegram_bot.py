@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 from apartmentfinder.application.filtering import listing_matches_search_filters
@@ -125,6 +126,24 @@ def test_listing_matches_search_filters_excludes_unknown_price_when_range_set() 
     )
 
     assert not listing_matches_search_filters(listing, SearchRequest(max_price=250))
+
+
+def test_listing_matches_search_filters_logs_rejection_reason(caplog) -> None:
+    listing = Listing(
+        ad_id=1,
+        title="Сдам комнату",
+        url="https://example.test/1",
+        price_usd=180,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="apartmentfinder.application"):
+        assert not listing_matches_search_filters(
+            listing,
+            SearchRequest(min_price=200),
+        )
+
+    assert "listing_filtered_out source=kufar ad_id=1 reason=price" in caplog.text
+    assert "min_price=200" in caplog.text
 
 
 def test_parse_keywords_accepts_commas_and_lines() -> None:

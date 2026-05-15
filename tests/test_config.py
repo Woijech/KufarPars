@@ -56,3 +56,22 @@ def test_settings_reads_new_apartmentfinder_env_prefix(monkeypatch) -> None:
 
     assert settings.bot_max_images == 4
 
+
+def test_settings_reads_source_base_urls(monkeypatch) -> None:
+    monkeypatch.setenv("APARTMENTFINDER_KUFAR_BASE_URL", "https://k.example.test")
+    monkeypatch.setenv("APARTMENTFINDER_REALT_BASE_URL", "https://r.example.test")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.kufar_base_url == "https://k.example.test"
+    assert settings.realt_base_url == "https://r.example.test"
+
+
+def test_settings_accepts_log_level_values() -> None:
+    assert Settings(log_level="INFO", _env_file=None).log_level == "INFO"
+    assert Settings(log_level="debug", _env_file=None).log_level == "DEBUG"
+
+
+def test_settings_rejects_invalid_log_level() -> None:
+    with pytest.raises(ValidationError, match="log_level must be"):
+        Settings(log_level="verbose", _env_file=None)
